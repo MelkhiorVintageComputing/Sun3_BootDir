@@ -1,0 +1,30 @@
+# Everything here is reproducible from what is tracked:
+#
+#   scripts/setup.sh          downloads, builds and generates all of it
+#   root/grant-privileges.sh  the one privileged step
+#
+# so nothing below belongs in the repository.
+
+# Downloads and unpacked packages (scripts/00-fetch-packages.sh, 02-fetch-payload.sh)
+/dist/
+/pkg/
+/payload/
+
+# Build trees (scripts/01-build-*.sh).  The patches applied to them are tracked.
+/src/*
+!/src/*.patch
+
+# Binaries, and the capabilities they carry, come from setup.sh + grant-privileges.sh
+/sbin/
+
+# Generated from config/sun3boot.conf by scripts/03-configure.sh
+/etc/
+/tftpboot/
+/nfsroot/
+
+# Runtime state
+/run/
+/log/
+
+__pycache__/
+*.pyc

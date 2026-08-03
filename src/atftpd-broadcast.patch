@@ -1,0 +1,51 @@
+Make --listen-local actually bind the data socket to the local address.
+
+A Sun-3 boot PROM does not learn the server's IP address from RARP, so it sends
+its TFTP read request to 255.255.255.255 and takes the answer from whoever
+replies.  atftpd reads the request's *destination* address out of IP_PKTINFO
+(tftp_io.c uses ipi_addr, not ipi_spec_dst) and binds the per-transfer data
+socket to it -- which for a broadcast request is 255.255.255.255.
+
+The result is a transfer that starts and then dies: the first DATA block goes
+out, but the client's ACK is addressed to the server's real address and is never
+delivered to a socket bound to the broadcast address.  Both ends time out.
+
+    Creating new socket: 255.255.255.255:58938
+    Serving C0A80079 to 192.168.0.121:1756
+    timeout block 0: retrying ...
+    client (192.168.0.121) not responding
+
+atftpd already has a --listen-local option, and the comment above this code
+describes precisely this problem and says the workaround is to force the socket
+onto the local address.  But since the 2011 change for
+http://bugs.debian.org/613582 stopped nullifying "to", the option only sets
+SO_BROADCAST and no longer rebinds -- and that same comment notes SO_BROADCAST
+alone does not help.  So --listen-local has quietly done nothing about the case
+it was added for.
+
+This restores the rebind, but only under --listen-local, leaving the default
+path (and the behaviour 613582 asked for) untouched.  Binding to the wildcard
+address lets the kernel choose the source address per route, and the socket then
+receives ACKs sent to the server's real address.
+
+Verified with tools/tftp-bcast-probe.py, which broadcasts a read request the way
+the PROM does: stock atftpd stalls after block 1, patched atftpd completes.
+
+--- a/tftpd.c
++++ b/tftpd.c
+@@ -719,6 +719,15 @@
+           if (listen_local == 1)
+           {
+                logger(LOG_INFO, "forcing socket to listen on local address");
++               /* Really do what the comment above says.  "to" still holds the
++                  destination address of the client's request, which for a
++                  client that broadcasts its read request (Sun boot PROMs do)
++                  is 255.255.255.255.  Binding the data socket to that address
++                  makes every reply unanswerable.  Bind to the wildcard address
++                  instead and let the kernel pick the right source per route. */
++               memset(&to, 0, sizeof(to));
++               to.ss_family = data->client_info->client.ss_family;
++               sockaddr_set_port(&to, 0);
+                if (setsockopt(data->sockfd, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)) != 0) {
+                   logger(LOG_ERR, "setsockopt: %s", strerror(errno));
+                }
