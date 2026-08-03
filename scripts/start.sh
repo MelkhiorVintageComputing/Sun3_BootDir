@@ -100,8 +100,12 @@ start_bootparamd() {
 	# daemon a private mount namespace with ours bind-mounted over it.  The
 	# network namespace is untouched, so it still registers and serves
 	# normally.
+	# -r is the default router reported in the WHOAMI reply.  Left to itself
+	# bootparamd answers with whatever the server's own name resolves to,
+	# which is 127.0.0.1 here -- telling the client to route via its own
+	# loopback.  Name the address the client actually reaches us on.
 	spawn bootparamd unshare --user --map-root-user --mount -- /bin/sh -c \
-		"mount --bind '$ETC/hosts' /etc/hosts && exec '$SBIN/rpc.bootparamd' -d -f '$ETC/bootparams'"
+		"mount --bind '$ETC/hosts' /etc/hosts && exec '$SBIN/rpc.bootparamd' -d -r '$SERVER_IP' -f '$ETC/bootparams'"
 }
 
 start_unfsd() {
