@@ -56,7 +56,7 @@ regenerates everything else from it and is safe to re-run:
 |---|---|---|
 | `etc/ethers` | rarpd (via a `/etc/ethers` symlink) | MAC → IP, one line per client |
 | `etc/hosts` | bootparamd (via a private mount namespace) | names, both directions |
-| `etc/bootparams` | rpc.bootparamd | where each client's root is |
+| `etc/bootparams` | rpc.bootparamd | each client's root, and its gateway |
 | `etc/exports` | unfsd | who may mount what |
 | `tftpboot/C0A80079` | atftpd | → the netboot program |
 | `nfsroot/sun3/netbsd` | unfsd | the kernel, hard-linked |

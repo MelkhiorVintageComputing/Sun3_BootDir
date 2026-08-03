@@ -178,6 +178,25 @@ def main():
     print(f"  domain_name   {w['domain_name']!r}")
     print(f"  router        {w['router']}")
 
+    # netboot asks for "gateway" before "root" and uses the address it gets
+    # back as its default route.  An empty answer is not fatal to the probe --
+    # a client on the server's own segment boots without one -- but it is worth
+    # reporting, because a missing entry is invisible until something needs to
+    # be routed.
+    print(f"\nGETFILE gateway for {w['client_name']!r}")
+    try:
+        gw = getfile(sock, w["responder"], w["bootparamd_port"],
+                     w["client_name"], "gateway")
+    except Exception as exc:
+        print(f"  FAILED: {exc}")
+        return 1
+    if gw["server_name"]:
+        print(f"  server_name   {gw['server_name']!r}")
+        print(f"  server_addr   {gw['server_addr']}")
+    else:
+        print("  no answer -- etc/bootparams has no 'gateway=' for this client,")
+        print("  so it will boot without a default route")
+
     print(f"\nGETFILE root for {w['client_name']!r}")
     try:
         g = getfile(sock, w["responder"], w["bootparamd_port"],
