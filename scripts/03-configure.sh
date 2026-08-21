@@ -119,21 +119,22 @@ clients | while read -r n m i a; do
 		done
 		;;
 	*)
-		# No boot program for this architecture yet.  rarpd still needs
-		# an entry here or it will not answer the client's RARP request
-		# at all, so leave something that says what it is.  It is never
-		# transferred: a sun2 fetches its bootstrap over ND.
+		# No boot program for this architecture yet.  Keep the name
+		# reserved so the directory shows every client, and so nothing
+		# else claims it; leave something that says what it is.
 		cat >"$f" <<-EOF
 			$PLACEHOLDER_MARK
 			Placeholder for $n ($a) at $i, written by scripts/03-configure.sh.
 
-			rarpd answers a RARP request only when the boot directory holds
-			a file whose first eight characters are the client's address in
-			hex, so this file is what lets $n get an address at all.
+			It is not a boot program and nothing here will load it.  A Sun-2
+			does no RARP and no TFTP: it fetches its bootstrap over ND, the
+			Network Disk protocol, which needs ndbootd.  Nothing in this
+			directory speaks ND -- see README, "A Sun-2".
 
-			It is not a boot program and nothing will load it.  A sun2 asks
-			for its bootstrap over ND (the Network Disk protocol), which
-			needs ndbootd -- see README, "A Sun-2".
+			This name is the one ndbootd would look for if it were serving
+			second-stage boot programs out of a directory, so replacing this
+			file with the real NetBSD/sun2 netboot is the right move once
+			there is an ND server to hand it over.
 		EOF
 		;;
 	esac

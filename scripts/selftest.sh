@@ -83,14 +83,14 @@ else
 	tmp=$(mktemp -d)
 	while read -r n m i a; do
 		f=$(tftpname "$i" "$a")
-		# A client with no boot program has a placeholder here instead of a
-		# symlink.  It exists only so rarpd will answer; serving it proves
-		# nothing, so check it is present and move on.
+		# A client with no boot program has a placeholder here instead of
+		# a symlink.  Nothing fetches it, so serving it would prove
+		# nothing; just note that the name is reserved and move on.
 		if [ ! -L "$TFTPBOOT/$f" ]; then
 			if [ -f "$TFTPBOOT/$f" ]; then
-				ok "$f ($n, $a) is a placeholder -- present, so rarpd will answer"
+				ok "$f ($n, $a) is a placeholder -- no boot program for this arch yet"
 			else
-				no "$f ($n) is missing, so rarpd will not answer this client"
+				no "$f ($n) is missing"
 			fi
 			continue
 		fi

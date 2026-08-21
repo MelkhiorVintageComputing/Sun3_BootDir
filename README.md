@@ -176,41 +176,66 @@ Bringing it up in stages makes a failure point at one protocol instead of five.
 
 ## A Sun-2
 
-`sun2_f_m` is in the table so rarpd will answer it. That is genuinely as far as
-this setup takes a Sun-2 today, and the reason is not a missing kernel:
+`sun2_f_m` is in the table, but this setup cannot boot it, and the gap is
+bigger than a missing kernel. From `ndbootd(8)`:
 
-**A Sun-2 does not use TFTP.** It loads its second-stage bootstrap over **ND,
-the Network Disk protocol**, served by `ndbootd(8)` — NetBSD/sun2 `INSTALL`,
-"the ndbootd(8) program will attempt to serve a second-stage bootstrap file
-using a name derived from the machine's recently acquired IP address". The
-filename suffix for every sun2 is `.SUN2`, so 192.168.0.123 becomes
-`C0A8007B.SUN2`. Nothing here speaks ND, and `ndbootd` is not in Debian.
+> The Sun 2 PROMs can only use ND to boot over the network. (Later, the Sun 3
+> PROMs would use RARP and TFTP to boot over the network.) [...] **Sun 2 PROMs
+> don't do RARP**, but they do learn their IP address from the first ND
+> response they receive from the server.
 
-What does carry over unchanged: RARP first, then, once `netboot` is running,
-bootparams and NFS exactly as a Sun-3 does. So the boot chain is
+So a Sun-2 shares almost nothing with the Sun-3 boot chain:
 
 ```
-RARP  ->  ND (missing)  ->  bootparams  ->  NFS
- ok        needs ndbootd      works          works
+              Sun-3                     Sun-2
+  address     RARP        rarpd         from the first ND reply
+  bootstrap   TFTP        atftpd        ND (IP protocol 77)     -- nothing here
+  root        bootparams + NFS          bootparams + NFS        -- once netboot runs
 ```
 
-### Why a payload-less client still needs a boot-directory entry
+`rarpd` will never see a packet from it. On the wire the requests look like
+this, and `tcpdump` cannot name the protocol because Debian's
+`/etc/protocols` has no entry for 77:
 
-`rarpd` is started with `-b tftpboot`, which makes it check for a file whose
-first eight characters are the client's address in hex **before it answers the
-RARP request at all**. Without one it stays silent, and the machine never gets
-an address — which is the very thing you would be trying to test.
+```
+08:00:20:01:06:e0 > ff:ff:ff:ff:ff:ff, ethertype IPv4 (0x0800),
+    (ttl 4, id 0, proto unknown (77), length 48)
+```
 
-So `03-configure.sh` writes a placeholder for any client whose architecture has
-no boot program, carrying a marker line that says what it is. Nothing ever
-transfers it. A later run recognises the marker and replaces its own file, so
-re-running stays clean. `selftest.sh` reports it as a placeholder rather than
-pretending a transfer proved something.
+IANA assigns protocol 77 to `SUN-ND`. Seeing these is the machine working
+correctly; there is simply nobody answering.
 
-The NetBSD/sun2 pieces, if this goes further: `installation/netboot/` in the
-10.1 sun2 distribution holds `bootyy` (the ND-loaded second stage) and
-`netboot`. The kernel to put in the client's NFS root would be
-`netbsd-RAMDISK`, hard-linked as `netbsd` and `vmunix`.
+### What serving it would take
+
+`ndbootd` is NetBSD's ND server, about 1000 lines, and it is not packaged for
+Debian. Its own README says it "has only been compiled and tested under NetBSD
+with BPF support, although [...] the raw interface support is broken out, which
+should allow for reasonable" porting — and that is the whole job: the
+link-layer backend lives alone in `config/ndbootd-bpf.c`, 313 lines of
+`/dev/bpf` `ioctl`s, and Linux needs an `AF_PACKET` equivalent. Link-layer
+access is unavoidable because the client has no address until the server
+replies to its Ethernet address.
+
+Two things already fit, if it is ever done:
+
+* `AF_PACKET` needs `CAP_NET_RAW` — the capability `rarpd` already carries, so
+  it would be one more line in `root/grant-privileges.sh`, not a new kind of
+  privilege.
+* `ndbootd -s <directory>` finds a client's second-stage program by the same
+  hex-plus-suffix name a Sun-3 TFTPs by, and reads `/etc/ethers` for its client
+  list. `03-configure.sh` already generates `tftpboot/C0A8007B.SUN2` and the
+  ethers entry, so the configuration side is done.
+
+The NetBSD/sun2 pieces: `installation/netboot/` in the 10.1 distribution holds
+`bootyy` (first stage, ND blocks 1-15) and `netboot` (second stage, block 16
+onwards). Both must be raw binaries with executable headers stripped. The
+kernel for the client's NFS root is `netbsd-RAMDISK`, hard-linked as `netbsd`
+and `vmunix`.
+
+Until then `03-configure.sh` writes a marked placeholder at the client's boot
+name so the directory shows every machine and the name is reserved;
+`selftest.sh` reports it as a placeholder rather than claiming a transfer
+proved anything.
 
 ## What needs root, and why only that
 

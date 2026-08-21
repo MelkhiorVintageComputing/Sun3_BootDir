@@ -45,10 +45,10 @@ hexip() {
 # The name the PROM actually requests.  sun3 asks for the bare hex string;
 # sun3x appends its architecture.  (NetBSD sun3/INSTALL.txt, "Boot/Install
 # from NFS server".)
-# A sun2 is here only for rarpd's benefit: it loads its bootstrap over ND, not
-# TFTP (see README, "A Sun-2").  rarpd gates its RARP reply on a file in the
-# boot directory whose first eight characters are the hex address, so the entry
-# has to exist even though no TFTP transfer will follow.
+# A sun2 name is not for TFTP and not for rarpd: a Sun-2 PROM does no RARP at
+# all and loads its bootstrap over ND.  The name is the one ndbootd would use
+# when serving second-stage programs out of a directory, which is the same
+# convention a Sun-3 TFTPs by.  (ndbootd(8), and README, "A Sun-2".)
 tftpname() {  # tftpname <ip> [arch]
 	case ${2:-sun3} in
 	sun3)  hexip "$1" ;;
