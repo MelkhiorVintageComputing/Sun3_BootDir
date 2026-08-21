@@ -270,13 +270,30 @@ needs no privilege at all:
 `46fc 2700` is `move #$2700,sr` — the first instruction of a 68000 boot
 program, so that really is `bootyy` coming back.
 
-### What is still missing
+### The kernel, and the name it is asked for
 
-There is no sun2 kernel. The one this fetches is from the sun3 distribution and
-a Sun-2 cannot run it, so `netboot` will get as far as mounting its root and
-find nothing to load. Fixing that means fetching `netbsd-RAMDISK` from the sun2
-distribution and hard-linking it as `netbsd` and `vmunix` in
-`nfsroot/sun2_f_m/`, per NetBSD 10.1 `sun2/INSTALL.txt`.
+The sun2 kernel is a separate download from the sun3 one -- different
+architecture, different MD5 file -- controlled by `NETBSD_KERNEL_SUN2`. It is
+fetched only when the table has a `sun2` in it:
+
+```
+payload/netbsd-RAMDISK       ELF 32-bit MSB, m68k, 68020   sun3
+payload/sun2-netbsd-RAMDISK  ELF 32-bit MSB, m68k, 68000   sun2
+```
+
+The name matters as much as the architecture. A Sun-2 PROM passes **`vmunix`**
+to netboot, not `netbsd`:
+
+```
+Boot: ie(0,0,0)vmunix
+>> NetBSD/sun2 netboot [1.13 ...]
+open vmunix: No such file or directory
+```
+
+So `03-configure.sh` hard-links the kernel as `netbsd`, `vmunix` and
+`netbsd-rd`, which is what NetBSD 10.1 `sun2/INSTALL.txt` asks for. `selftest.sh`
+reads back the name each client will actually request -- `vmunix` for a sun2,
+`netbsd` for a sun3 -- rather than assuming one name for everything.
 
 ## What needs root, and why only that
 

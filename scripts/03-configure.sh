@@ -120,7 +120,7 @@ write_placeholder() {  # write_placeholder <path> <name> <arch> <ip>
 # NFS root, later) is left alone, as is the root of a client you delete from
 # the table.
 SUN2_NETBOOT=$BOOTDIR/payload/sun2-netboot
-SUN2_BOOT1=$BOOTDIR/payload/sun2-bootyy
+SUN2_KERNEL_SRC=$BOOTDIR/payload/sun2-${NETBSD_KERNEL_SUN2:-netbsd-RAMDISK}
 
 clients | while read -r n m i a; do
 	f=$TFTPBOOT/$(tftpname "$i" "$a")
@@ -139,15 +139,24 @@ clients | while read -r n m i a; do
 		# by the same hex-plus-suffix name a Sun-3 would TFTP.  The
 		# first stage is not here: it is the whole of ND blocks 1-15,
 		# passed to ndbootd on its command line by start.sh.
-		#
-		# No kernel: the one we fetch is from the sun3 distribution and
-		# a Sun-2 cannot run it.  netboot will get as far as mounting
-		# the root and then find nothing it can load, which is the
-		# expected state until a sun2 kernel is added.
 		if [ -f "$SUN2_NETBOOT" ]; then
 			ln -sf "$SUN2_NETBOOT" "$f"
 		else
 			write_placeholder "$f" "$n" "$a" "$i"
+		fi
+		# The sun2 kernel is its own architecture, and its own download.
+		# "vmunix" matters: that is the name the PROM passes to netboot
+		# by default, and what a Sun-2 asks for before anything else.
+		# (NetBSD 10.1 sun2/INSTALL.txt: "hard-linked under the names
+		# netbsd and vmunix".)
+		if [ -f "$SUN2_KERNEL_SRC" ]; then
+			for k in netbsd vmunix netbsd-rd "$(basename "$SUN2_KERNEL_SRC")"; do
+				rm -f "$NFSROOT/$n/$k"
+				ln "$SUN2_KERNEL_SRC" "$NFSROOT/$n/$k" 2>/dev/null \
+					|| cp "$SUN2_KERNEL_SRC" "$NFSROOT/$n/$k"
+			done
+		else
+			warn "$SUN2_KERNEL_SRC missing -- run scripts/02-fetch-payload.sh; $n has no kernel"
 		fi
 		;;
 	*)

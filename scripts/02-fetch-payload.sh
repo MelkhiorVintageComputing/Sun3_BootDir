@@ -74,12 +74,29 @@ mv "$BOOTDIR/payload/$KERNEL.new" "$BOOTDIR/payload/$KERNEL"
 SUN2_FILES=
 if clients | awk '$4 == "sun2" { found = 1 } END { exit !found }'; then
 	SUN2_BASE=https://cdn.netbsd.org/pub/NetBSD/NetBSD-$NETBSD_RELEASE/sun2
+	SUN2_KERNEL=${NETBSD_KERNEL_SUN2:-netbsd-RAMDISK}
 	say "a sun2 client is configured; fetching its ND boot programs"
 	for f in bootyy netboot; do
 		fetch "$SUN2_BASE/installation/netboot/$f" "$DIST/sun2-$f"
 		cp -f "$DIST/sun2-$f" "$BOOTDIR/payload/sun2-$f"
 	done
-	SUN2_FILES='sun2-bootyy sun2-netboot'
+
+	# ...and its kernel, which is a different architecture from the sun3
+	# one above and so a separate download and a separate MD5 file.
+	fetch "$SUN2_BASE/binary/kernel/$SUN2_KERNEL.gz" "$DIST/sun2-$SUN2_KERNEL.gz"
+	fetch "$SUN2_BASE/binary/kernel/MD5"             "$DIST/sun2-kernel-MD5"
+
+	say "verifying sun2 $SUN2_KERNEL.gz against the upstream MD5 file"
+	want=$(awk -v f="($SUN2_KERNEL.gz)" '$2 == f { print $4 }' "$DIST/sun2-kernel-MD5")
+	[ -n "$want" ] || die "$SUN2_KERNEL.gz is not listed in the sun2 MD5 file -- check NETBSD_KERNEL_SUN2"
+	got=$(md5sum <"$DIST/sun2-$SUN2_KERNEL.gz" | cut -d' ' -f1)
+	[ "$want" = "$got" ] || die "MD5 mismatch for sun2 $SUN2_KERNEL.gz (want $want, got $got)"
+
+	say "decompressing sun2 $SUN2_KERNEL"
+	gzip -dc "$DIST/sun2-$SUN2_KERNEL.gz" >"$BOOTDIR/payload/sun2-$SUN2_KERNEL.new"
+	mv "$BOOTDIR/payload/sun2-$SUN2_KERNEL.new" "$BOOTDIR/payload/sun2-$SUN2_KERNEL"
+
+	SUN2_FILES="sun2-bootyy sun2-netboot sun2-$SUN2_KERNEL"
 fi
 
 # --- optional miniroot ------------------------------------------------------

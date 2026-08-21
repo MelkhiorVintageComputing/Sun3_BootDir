@@ -170,15 +170,27 @@ else
 fi
 
 echo
-echo '8. NFSv3 mount and kernel read'
+echo "8. NFSv3: every client's root, and the kernel it will ask for"
 if ! is_running unfsd; then
 	skip 'unfsd not running'
-elif python3 "$BOOTDIR/tools/nfs-probe.py" >"$LOG/nfs-probe.out" 2>&1; then
-	ok 'mounted the export and read the kernel'
-	sed 's/^/        /' "$LOG/nfs-probe.out"
 else
-	no 'NFS probe failed:'
-	sed 's/^/        /' "$LOG/nfs-probe.out"
+	while read -r n m i a; do
+		# A Sun-2 PROM passes "vmunix" to netboot; a Sun-3 asks for
+		# "netbsd".  Check the name that machine will actually use.
+		case $a in
+		sun2) want=vmunix ;;
+		*)    want=netbsd ;;
+		esac
+		if python3 "$BOOTDIR/tools/nfs-probe.py" --client "$n" --file "$want" \
+				>"$LOG/nfs-probe-$n.out" 2>&1; then
+			ok "$n: mounted its root and read $want"
+		else
+			no "$n: could not read $want from its root:"
+			sed 's/^/        /' "$LOG/nfs-probe-$n.out"
+		fi
+	done <<EOF
+$(clients)
+EOF
 fi
 
 echo
