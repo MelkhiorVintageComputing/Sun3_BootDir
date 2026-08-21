@@ -26,6 +26,10 @@ fi
 # Worked out here rather than inside the heredoc, where the quoting needed to
 # get an awk program through unscathed is not worth it.
 SUN2_MAC=$(clients | awk '$4 == "sun2" { print $2; exit }')
+case $(clients | awk '$4 == "sun2" { print $5; exit }') in
+sunos) SUN2_BOOT1=$BOOTDIR/payload/sunos-sun2.bb ;;
+*)     SUN2_BOOT1=$BOOTDIR/payload/sun2-bootyy ;;
+esac
 
 say "entering a private user+network namespace"
 # --pid --fork --kill-child means every daemon started inside dies with this
@@ -43,6 +47,7 @@ NAME='$(tftpname "$CLIENT_IP" "$CLIENT_ARCH")'
 CLIENT_IP='$CLIENT_IP'
 SERVER_IP='$SERVER_IP'
 SUN2_MAC='$SUN2_MAC'
+SUN2_BOOT1='$SUN2_BOOT1'
 INNER_SCRIPT=1
 $(cat <<'SCRIPT'
 
@@ -123,8 +128,8 @@ if [ -z "$SUN2_MAC" ]; then
 	echo '  SKIP  no sun2 client configured'
 elif [ ! -x "$SBIN/ndbootd" ]; then
 	no 'sbin/ndbootd missing -- run scripts/01-build-ndbootd.sh'
-elif [ ! -f "$BOOTDIR/payload/sun2-bootyy" ]; then
-	no 'payload/sun2-bootyy missing -- run scripts/02-fetch-payload.sh'
+elif [ ! -f "$SUN2_BOOT1" ]; then
+	no "$SUN2_BOOT1 missing -- run scripts/02-fetch-payload.sh"
 else
 	# A veth pair is the whole point here: ndbootd needs a real interface
 	# to open an AF_PACKET socket on, and inside this namespace we can make
@@ -133,10 +138,10 @@ else
 	ip link add nd0 type veth peer name nd1 \
 		&& ip addr add "$SERVER_IP/24" dev nd0 \
 		&& ip link set nd0 up && ip link set nd1 up
-	start ndbootd "$SBIN/ndbootd" -d -i nd0 -s "$TFTPBOOT" \
-		"$BOOTDIR/payload/sun2-bootyy" || exit 1
+	start ndbootd "$SBIN/ndbootd" -d -i nd0 -s "$TFTPBOOT" "$SUN2_BOOT1" || exit 1
 	# Block 0 is the label; blocks 1-15 are the first stage, and block 16
 	# onwards is the second stage ndbootd finds by hex name in tftpboot.
+	echo "        first stage: ${SUN2_BOOT1##*/}"
 	for blk in 1 16; do
 		if out=$(python3 "$BOOTDIR/tools/nd-probe.py" --interface nd1 \
 				--client-mac "$SUN2_MAC" --block "$blk" 2>&1); then

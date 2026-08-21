@@ -4,7 +4,8 @@
 #   start.sh          everything (milestone M3: the Sun-3 boots a kernel)
 #   start.sh m1       rarpd + atftpd only -- the PROM downloads netboot
 #   start.sh m2       + rpcbind + bootparamd -- netboot finds its root
-#   start.sh <name>   just one of: rarpd ndbootd atftpd rpcbind bootparamd unfsd
+#   start.sh <name>   just one of: rarpd ndbootd atftpd rpcbind bootparamd
+#                     unfsd nfs2d
 #
 # ndbootd is started only when the table has a sun2 in it; nothing else needs
 # it, and it will not run without a first-stage boot program to serve.
@@ -97,11 +98,24 @@ start_ndbootd() {
 		warn "  (ndbootd is new, and capabilities do not survive a rebuild)."
 		return 0 ;;
 	esac
-	boot1=$BOOTDIR/payload/sun2-bootyy
+	# The first stage differs entirely between the two payloads, and ndbootd
+	# serves exactly one.  NetBSD's bootyy speaks ND onwards; SunOS's sun2.bb
+	# stops using ND immediately and goes off to RARP and TFTP instead.
+	sun2_payloads=$(clients | awk '$4 == "sun2" { print $5 }' | sort -u)
+	set -- $sun2_payloads
+	if [ $# -gt 1 ]; then
+		warn "sun2 clients ask for different payloads ($*) -- ndbootd serves one"
+		warn "  first stage, so using $1; give the others their own ndbootd"
+	fi
+	case $1 in
+	sunos) boot1=$BOOTDIR/payload/sunos-sun2.bb ;;
+	*)     boot1=$BOOTDIR/payload/sun2-bootyy ;;
+	esac
 	if [ ! -f "$boot1" ]; then
 		warn "$boot1 missing -- run scripts/02-fetch-payload.sh; no sun2 can boot"
 		return 0
 	fi
+	say "ndbootd first stage: ${boot1#"$BOOTDIR"/} ($1)"
 
 	# ndbootd binds one interface per instance and has no -a.  With every
 	# sun2 on one segment that is fine; more than one would need more than
@@ -118,6 +132,19 @@ start_ndbootd() {
 	#    exactly as atftpd does for a Sun-3.
 	# The trailing argument is the first stage, ND blocks 1-15.
 	spawn ndbootd "$SBIN/ndbootd" -d -i "$1" -s "$TFTPBOOT" "$boot1"
+}
+
+start_nfs2d() {
+	# SunOS 4.0.3 is from 1989 and speaks NFS version 2; unfs3 serves version
+	# 3 and nothing else.  They register under different version numbers, so
+	# both run at once and each client uses the one it can talk to.
+	if [ -z "$(clients | awk '$5 == "sunos"')" ]; then
+		say "no sunos client configured; not starting nfs2d"
+		return 0
+	fi
+	is_running rpcbind || warn "rpcbind is not running; nfs2d will fail to register"
+	spawn nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
+		--root "$NFSROOT" --port "${NFS2D_PORT:-2050}" --debug
 }
 
 start_atftpd() {
@@ -171,14 +198,16 @@ start_unfsd() {
 case "${1:-all}" in
 m1)         start_rarpd; start_ndbootd; start_atftpd ;;
 m2)         start_rarpd; start_ndbootd; start_atftpd; start_rpcbind; start_bootparamd ;;
-m3|all)     start_rarpd; start_ndbootd; start_atftpd; start_rpcbind; start_bootparamd; start_unfsd ;;
+m3|all)     start_rarpd; start_ndbootd; start_atftpd; start_rpcbind; start_bootparamd
+            start_unfsd; start_nfs2d ;;
 rarpd)      start_rarpd ;;
 ndbootd)    start_ndbootd ;;
 atftpd)     start_atftpd ;;
 rpcbind)    start_rpcbind ;;
 bootparamd) start_bootparamd ;;
 unfsd)      start_unfsd ;;
-*) die "usage: $0 [m1|m2|m3|all|rarpd|ndbootd|atftpd|rpcbind|bootparamd|unfsd]" ;;
+nfs2d)      start_nfs2d ;;
+*) die "usage: $0 [m1|m2|m3|all|rarpd|ndbootd|atftpd|rpcbind|bootparamd|unfsd|nfs2d]" ;;
 esac
 
 echo

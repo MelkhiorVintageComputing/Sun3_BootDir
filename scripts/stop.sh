@@ -3,7 +3,7 @@
 
 . "$(dirname -- "$0")/common.sh"
 
-DAEMONS=${*:-unfsd bootparamd rpcbind atftpd ndbootd rarpd}
+DAEMONS=${*:-nfs2d unfsd bootparamd rpcbind atftpd ndbootd rarpd}
 
 for name in $DAEMONS; do
 	if ! is_running "$name"; then

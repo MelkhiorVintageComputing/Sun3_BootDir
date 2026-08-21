@@ -49,6 +49,11 @@ class Decoder:
         self.off += 8
         return v
 
+    def fixed(self, n):
+        v = self.buf[self.off:self.off + n]
+        self.off += n
+        return v
+
     def opaque(self):
         n = self.u32()
         v = self.buf[self.off:self.off + n]
@@ -104,6 +109,73 @@ def getport(sock, server, prog, vers):
     return Decoder(body).u32()
 
 
+MOUNTVERS1, NFSVERS2 = 1, 2
+NFSPROC2_LOOKUP, NFSPROC2_READ = 4, 6
+
+
+def probe_v2(sock, args, export):
+    """MOUNT v1 then NFS v2, which is all SunOS 4.0.3 can speak."""
+    try:
+        mport = getport(sock, args.server, MOUNTPROG, MOUNTVERS1)
+    except Exception as exc:
+        print(f"GETPORT mountd v1: FAILED: {exc}")
+        return 1
+    if mport == 0:
+        print("GETPORT mountd v1: not registered -- is tools/nfs2d.py running?")
+        return 1
+    print(f"GETPORT mountd v1   -> port {mport}")
+
+    reply = rpc_call(sock, (args.server, mport), MOUNTPROG, MOUNTVERS1, 1,
+                     xdr_string(export))
+    d = Decoder(reply)
+    status = d.u32()
+    if status != 0:
+        print(f"MNT {export} -> status {status} (not exported to us?)")
+        return 1
+    fh = d.fixed(32)
+    print(f"MNT {export} -> filehandle {len(fh)} bytes")
+
+    try:
+        nport = getport(sock, args.server, NFSPROG, NFSVERS2)
+    except Exception as exc:
+        print(f"GETPORT nfs v2: FAILED: {exc}")
+        return 1
+    if nport == 0:
+        print("GETPORT nfs v2: not registered")
+        return 1
+    print(f"GETPORT nfs v2      -> port {nport}")
+
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_LOOKUP, fh + xdr_string(args.file))
+    d = Decoder(reply)
+    status = d.u32()
+    if status != 0:
+        print(f"LOOKUP {args.file} -> NFSv2 error {status}")
+        return 1
+    filefh = d.fixed(32)
+    d.off += 68                                   # struct fattr
+    print(f"LOOKUP {args.file:<12} -> filehandle {len(filefh)} bytes")
+
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_READ,
+                     filefh + struct.pack("!III", 0, 1024, 1024))
+    d = Decoder(reply)
+    status = d.u32()
+    if status != 0:
+        print(f"READ {args.file} -> NFSv2 error {status}")
+        return 1
+    d.off += 68                                   # struct fattr
+    data = d.opaque()
+    print(f"READ {args.file} 0..1024 -> {len(data)} bytes, "
+          f"first 16: {data[:16].hex()}")
+    if not data:
+        print("\n  read returned nothing")
+        return 1
+    print(f"\nOK: a SunOS boot program could mount {export} and read "
+          f"{args.file} over NFSv2")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -113,6 +185,9 @@ def main():
     ap.add_argument("--client", default=None,
                     help="which CLIENTS entry to use, by name or IP "
                          "(default: the first)")
+    ap.add_argument("--nfs-version", type=int, choices=(2, 3), default=3,
+                    help="3 for unfs3 and NetBSD (default); 2 for tools/nfs2d.py "
+                         "and SunOS, which predates NFSv3 by six years")
     ap.add_argument("--file", default="netbsd",
                     help="file to look up inside it (default: netbsd)")
     args = ap.parse_args()
@@ -122,6 +197,9 @@ def main():
                                          sun3conf.pick(args.client)["name"])
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    if args.nfs_version == 2:
+        return probe_v2(sock, args, export)
 
     try:
         mport = getport(sock, args.server, MOUNTPROG, MOUNTVERS3)

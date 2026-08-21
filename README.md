@@ -295,6 +295,85 @@ So `03-configure.sh` hard-links the kernel as `netbsd`, `vmunix` and
 reads back the name each client will actually request -- `vmunix` for a sun2,
 `netbsd` for a sun3 -- rather than assuming one name for everything.
 
+## SunOS on the Sun-2
+
+`sun2_f_m` can boot SunOS 4.0.3 instead of NetBSD. Which one it gets is the
+fifth column of its `CLIENTS` line:
+
+```sh
+sun2_f_m	08:00:20:01:06:e0	192.168.0.123	sun2	sunos
+```
+
+Change that word to `netbsd`, re-run `scripts/03-configure.sh` and restart, and
+it boots NetBSD again. The two are alternatives per machine, not per server:
+the Sun-3s keep booting NetBSD either way.
+
+The boot programs come from `../Sun-2_DiskImage/netboot/`, set by
+`SUNOS_NETBOOT_DIR`. That directory is read only as far as this is concerned --
+`02-fetch-payload.sh` verifies it against its own `SHA256SUMS` and copies out of
+it, never into it.
+
+### It is a different chain, not a different kernel
+
+```
+             NetBSD/sun2                     SunOS 4.0.3
+  ND         bootyy, then netboot            sun2.bb only
+  RARP       not used                        sun2.bb asks, rarpd answers
+  TFTP       not used                        C0A8007B.SUN2 = boot.sun2
+  bootparams whoami + getfile root           same
+  NFS        version 3, unfs3                version 2, tools/nfs2d.py
+  kernel     netbsd / vmunix                 vmunix
+```
+
+Only the middle two lines are shared. NetBSD carries ND all the way to its
+second stage; SunOS drops ND after 15 blocks and finishes over RARP and TFTP,
+which is why `rarpd` matters for a Sun-2 running SunOS and not for one running
+NetBSD. `start.sh` picks `ndbootd`'s first stage from the payload word, and
+says which one it chose.
+
+### tools/nfs2d.py, a read-only NFSv2 server
+
+SunOS 4.0.3 is from 1989. NFSv3 is from 1995. `boot.sun2` and the SunOS kernel
+speak NFS version 2, which unfs3 does not serve, and this host's kernel has no
+`CONFIG_NFSD_V2` (and would want root anyway). So `tools/nfs2d.py` serves NFS
+version 2 and MOUNT version 1, in about 490 lines of Python, as an ordinary
+user.
+
+It runs **alongside** unfs3 rather than instead of it. RPC programs register per
+version, so the two do not collide:
+
+```
+100003  3  udp  2049   nfs      unfs3     NetBSD clients
+100005  3  udp  2049   mountd   unfs3
+100003  2  udp  2050   nfs      nfs2d     SunOS clients
+100005  1  udp  2050   mountd   nfs2d
+```
+
+Both Sun-3s and the Sun-2 can boot at the same time, each over the version it
+understands. `nfs2d` registers itself through the portmapper, so its port is
+not something a client has to be told.
+
+It is deliberately **read-only**: everything that would modify the export
+returns `NFSERR_ROFS`. That is enough to load a kernel, which is what
+netbooting is. It is not enough for SunOS to then come up multiuser -- see
+below.
+
+`selftest.sh` reads each client's kernel back over the version that client will
+actually use, `--nfs-version 2` for a SunOS client and 3 for the others.
+
+### How far this gets
+
+To the kernel, and no further. The chain is proven up to and including
+`boot.sun2` reading `vmunix` out of the NFS root. What happens next is that the
+kernel does RARP and bootparams **again for itself**, mounts root, and tries to
+run `/usr/etc/init` out of it.
+
+That needs a populated, writable SunOS root filesystem, which is not in
+`netboot/` and is not something this directory has. Expect the kernel to load,
+start, and then fail to find a userland. Getting past that is the same problem
+as "A real NFS root, later" below, with SunOS's ownership and device nodes on
+top.
+
 ## What needs root, and why only that
 
 | daemon | needs | why |
@@ -305,6 +384,7 @@ reads back the name each client will actually request -- `vmunix` for a sun2,
 | `rpcbind` | `cap_net_bind_service` | the portmapper is udp+tcp/111 |
 | `rpc.bootparamd` | nothing | ephemeral port, registers with rpcbind |
 | `unfsd` | nothing | 2049 is already unprivileged |
+| `nfs2d` | nothing | an ordinary UDP port, found through the portmapper |
 
 `root/grant-privileges.sh` grants those capabilities and points
 `/etc/ethers` at `etc/ethers`. The symlink is there because `rarpd` has no
@@ -436,13 +516,11 @@ Set `PAYLOAD=custom` in the config and point `CUSTOM_NETBOOT` and
 `CUSTOM_KERNEL` at your own files. `02-fetch-payload.sh` then only checks they
 exist; everything downstream is unchanged.
 
-One caveat, and it is a real one. **unfs3 speaks NFSv3 only.** That is fine for
-NetBSD, whose bootloader tries MOUNT v3 first and only falls back to v1
-(`sys/lib/libsa/nfs.c`). A **SunOS 4.x** boot program speaks NFSv2 and nothing
-else, so it cannot load a kernel from `unfsd`. This host's kernel is built with
-`CONFIG_NFSD_V2` unset, so the in-kernel server cannot fill the gap either.
-Going down the SunOS route means finding an NFSv2 server first; RARP, TFTP and
-bootparams all work unchanged.
+**unfs3 speaks NFSv3 only**, which is fine for NetBSD -- its bootloader tries
+MOUNT v3 first and only falls back to v1 (`sys/lib/libsa/nfs.c`). A **SunOS
+4.x** boot program speaks NFSv2 and nothing else, and this host's kernel is
+built with `CONFIG_NFSD_V2` unset, so neither unfs3 nor the in-kernel server
+can serve it. That gap is filled by `tools/nfs2d.py`; see "SunOS on the Sun-2".
 
 ## A real NFS root, later
 
@@ -462,7 +540,7 @@ config/     the one file you edit
 scripts/    everything unprivileged
 root/       the one thing that is not
 tools/      protocol probes (bp-probe.py, nfs-probe.py, tftp-bcast-probe.py,
-            nd-probe.py)
+            nd-probe.py) and nfs2d.py, a read-only NFSv2 server
             and sun3conf.py, which reads the client table for them
 sbin/       the daemons; four carry capabilities
 etc/        generated configuration

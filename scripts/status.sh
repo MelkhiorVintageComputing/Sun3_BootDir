@@ -8,11 +8,12 @@
 if [ "${1:-}" = "-f" ]; then
 	say "tailing all logs (Ctrl-C to stop)"
 	exec tail -n 20 -F "$LOG"/rarpd.log "$LOG"/ndbootd.log "$LOG"/atftpd.log \
-		"$LOG"/rpcbind.log "$LOG"/bootparamd.log "$LOG"/unfsd.log 2>/dev/null
+		"$LOG"/rpcbind.log "$LOG"/bootparamd.log "$LOG"/unfsd.log \
+		"$LOG"/nfs2d.log 2>/dev/null
 fi
 
 printf 'daemon      pid      state\n'
-for name in rarpd ndbootd atftpd rpcbind bootparamd unfsd; do
+for name in rarpd ndbootd atftpd rpcbind bootparamd unfsd nfs2d; do
 	if is_running "$name"; then
 		printf '%-11s %-8s running\n' "$name" "$(cat "$RUN/$name.pid")"
 	else
@@ -42,7 +43,7 @@ fi
 
 echo
 echo 'the clients will be told:'
-clients | while read -r n m i a; do
+clients | while read -r n m i a p; do
 	f=$(tftpname "$i" "$a")
 	printf '  TFTP file   %-14s %s -> %s\n' "$n" "$f" \
 		"$(readlink -f "$TFTPBOOT/$f" 2>/dev/null || echo 'MISSING -- run 03-configure.sh')"

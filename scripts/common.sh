@@ -58,11 +58,12 @@ tftpname() {  # tftpname <ip> [arch]
 	esac
 }
 
-# The client table, one "<name> <MAC> <IP> <arch>" per line, comments and blank
-# lines removed and the arch defaulted.  Every generator loops over this.
+# The client table, one "<name> <MAC> <IP> <arch> <payload>" per line, comments
+# and blank lines removed and the optional fields defaulted.  Every generator
+# loops over this, so read five fields even where you only want four.
 clients() {
 	printf '%s\n' "$CLIENTS" | sed 's/#.*//' \
-		| awk 'NF { print $1, $2, $3, (NF >= 4 ? $4 : "sun3") }'
+		| awk 'NF { print $1, $2, $3, (NF >= 4 ? $4 : "sun3"), (NF >= 5 ? $5 : "netbsd") }'
 }
 
 # Reject a table that would produce configuration nobody can debug: rarpd would
@@ -74,13 +75,21 @@ check_clients() {
 		dup=$(clients | awk -v f="${field%%:*}" '{print $f}' | sort | uniq -d)
 		[ -z "$dup" ] || die "duplicate client ${field#*:} in CLIENTS: $dup"
 	done
-	clients | while read -r n m i a; do
+	clients | while read -r n m i a p; do
 		case $m in
 		[0-9a-fA-F]*:*:*:*:*:*) ;;
 		*) die "client $n: '$m' is not an Ethernet address" ;;
 		esac
 		hexip "$i" >/dev/null
 		case $a in sun2|sun3|sun3x) ;; *) die "client $n: arch must be sun2, sun3 or sun3x, not '$a'" ;; esac
+		case $p in
+		netbsd) ;;
+		sunos)
+			# Only the sun2 SunOS boot programs are on hand.  A sun3
+			# SunOS boot would want its own boot.sun3 and vmunix.
+			[ "$a" = sun2 ] || die "client $n: payload sunos is only set up for sun2, not $a" ;;
+		*) die "client $n: payload must be netbsd or sunos, not '$p'" ;;
+		esac
 	done || exit 1
 }
 
@@ -125,7 +134,7 @@ directly_reachable() {  # directly_reachable <ip>
 
 # The first client is "the" client for the probes and the dry run, which only
 # ever deal with one at a time.
-read -r CLIENT_NAME CLIENT_MAC CLIENT_IP CLIENT_ARCH <<EOF
+read -r CLIENT_NAME CLIENT_MAC CLIENT_IP CLIENT_ARCH CLIENT_PAYLOAD <<EOF
 $(clients | head -1)
 EOF
 

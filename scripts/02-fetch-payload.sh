@@ -99,6 +99,25 @@ if clients | awk '$4 == "sun2" { found = 1 } END { exit !found }'; then
 	SUN2_FILES="sun2-bootyy sun2-netboot sun2-$SUN2_KERNEL"
 fi
 
+# --- SunOS 4.0.3 for sun2 ---------------------------------------------------
+# Not a download: these come off a local tape extraction, and that directory is
+# read-only as far as we are concerned.  Copy them in under sunos- names and
+# check them against the hashes recorded beside them.
+SUNOS_FILES=
+if clients | awk '$5 == "sunos" { found = 1 } END { exit !found }'; then
+	src=${SUNOS_NETBOOT_DIR:-../Sun-2_DiskImage/netboot}
+	case $src in /*) ;; *) src=$BOOTDIR/$src ;; esac
+	[ -d "$src" ] || die "SUNOS_NETBOOT_DIR ($src) does not exist"
+	say "a sunos client is configured; taking its boot programs from ${src}"
+	( cd "$src" && sha256sum -c --quiet SHA256SUMS ) \
+		|| die "$src does not match its own SHA256SUMS"
+	for f in sun2.bb boot.sun2 vmunix; do
+		[ -f "$src/$f" ] || die "$src/$f is missing"
+		cp -f "$src/$f" "$BOOTDIR/payload/sunos-$f"
+	done
+	SUNOS_FILES='sunos-sun2.bb sunos-boot.sun2 sunos-vmunix'
+fi
+
 # --- optional miniroot ------------------------------------------------------
 if [ "${NETBSD_FETCH_MINIROOT:-no}" = yes ]; then
 	fetch "$BASE/installation/miniroot/miniroot.fs.gz" "$DIST/miniroot.fs.gz"
@@ -114,7 +133,7 @@ if [ -f "$MANIFEST" ]; then
 		|| die "payload changed unexpectedly; delete payload/SHA256SUMS if that was intentional"
 else
 	# shellcheck disable=SC2086
-	( cd "$BOOTDIR/payload" && sha256sum netboot "$KERNEL" $SUN2_FILES >SHA256SUMS )
+	( cd "$BOOTDIR/payload" && sha256sum netboot "$KERNEL" $SUN2_FILES $SUNOS_FILES >SHA256SUMS )
 	say "recorded payload/SHA256SUMS"
 fi
 

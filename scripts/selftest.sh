@@ -45,7 +45,7 @@ fi
 # gateway RARPs successfully and then stalls, which reads as a TFTP fault.
 # Reading from a heredoc, not a pipe: a pipe would run the loop in a subshell
 # and the pass/fail counters would not survive it.
-while read -r n m i a; do
+while read -r n m i a p; do
 	if directly_reachable "$i"; then
 		dev=$(route_dev "$i")
 		if ! iface_up "$dev"; then
@@ -77,6 +77,13 @@ if [ -n "$(clients | awk '$4 == "sun2"')" ]; then
 		no 'ndbootd not running, so no sun2 can get an address'
 	fi
 fi
+if [ -n "$(clients | awk '$5 == "sunos"')" ]; then
+	if is_running nfs2d; then
+		ok 'nfs2d running (a sunos client needs NFSv2)'
+	else
+		no 'nfs2d not running, so SunOS cannot read its kernel'
+	fi
+fi
 
 echo
 echo '3. listening sockets'
@@ -97,7 +104,7 @@ elif ! is_running atftpd; then
 	skip 'atftpd not running'
 else
 	tmp=$(mktemp -d)
-	while read -r n m i a; do
+	while read -r n m i a p; do
 		f=$(tftpname "$i" "$a")
 		# A client with no boot program has a placeholder here instead of
 		# a symlink.  Nothing fetches it, so serving it would prove
@@ -174,18 +181,24 @@ echo "8. NFSv3: every client's root, and the kernel it will ask for"
 if ! is_running unfsd; then
 	skip 'unfsd not running'
 else
-	while read -r n m i a; do
+	while read -r n m i a p; do
 		# A Sun-2 PROM passes "vmunix" to netboot; a Sun-3 asks for
-		# "netbsd".  Check the name that machine will actually use.
+		# "netbsd".  Check the name that machine will actually use, over
+		# the NFS version it can actually speak -- SunOS 4.0.3 is six
+		# years older than NFSv3.
 		case $a in
 		sun2) want=vmunix ;;
 		*)    want=netbsd ;;
 		esac
+		case $p in
+		sunos) vers=2 ;;
+		*)     vers=3 ;;
+		esac
 		if python3 "$BOOTDIR/tools/nfs-probe.py" --client "$n" --file "$want" \
-				>"$LOG/nfs-probe-$n.out" 2>&1; then
-			ok "$n: mounted its root and read $want"
+				--nfs-version "$vers" >"$LOG/nfs-probe-$n.out" 2>&1; then
+			ok "$n: mounted its root and read $want over NFSv$vers"
 		else
-			no "$n: could not read $want from its root:"
+			no "$n: could not read $want from its root over NFSv$vers:"
 			sed 's/^/        /' "$LOG/nfs-probe-$n.out"
 		fi
 	done <<EOF
