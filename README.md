@@ -58,7 +58,7 @@ regenerates everything else from it and is safe to re-run:
 | `etc/hosts` | bootparamd (via a private mount namespace) | names, both directions |
 | `etc/bootparams` | rpc.bootparamd | each client's root, and its gateway |
 | `etc/exports` | unfsd | who may mount what |
-| `tftpboot/C0A80079` | atftpd | → the netboot program |
+| `tftpboot/C0A80079` | atftpd, and rarpd's `-b` check | → the netboot program |
 | `nfsroot/sun3/netbsd` | unfsd | the kernel, hard-linked |
 
 The TFTP filename is the client's IP in uppercase hex. 192.168.0.121 becomes
@@ -73,6 +73,7 @@ table and pick a `3X` kernel.
 CLIENTS='
 sun3	08:00:20:11:22:33	192.168.0.121	sun3
 sun3b	08:00:20:51:45:4D	192.168.0.122	sun3
+sun2_f_m	08:00:20:01:06:e0	192.168.0.123	sun2
 '
 ```
 
@@ -172,6 +173,44 @@ reports it as `(no carrier yet)` rather than a failure.
 
 `start.sh m1` runs only RARP and TFTP, `m2` adds bootparams, `m3` adds NFS.
 Bringing it up in stages makes a failure point at one protocol instead of five.
+
+## A Sun-2
+
+`sun2_f_m` is in the table so rarpd will answer it. That is genuinely as far as
+this setup takes a Sun-2 today, and the reason is not a missing kernel:
+
+**A Sun-2 does not use TFTP.** It loads its second-stage bootstrap over **ND,
+the Network Disk protocol**, served by `ndbootd(8)` — NetBSD/sun2 `INSTALL`,
+"the ndbootd(8) program will attempt to serve a second-stage bootstrap file
+using a name derived from the machine's recently acquired IP address". The
+filename suffix for every sun2 is `.SUN2`, so 192.168.0.123 becomes
+`C0A8007B.SUN2`. Nothing here speaks ND, and `ndbootd` is not in Debian.
+
+What does carry over unchanged: RARP first, then, once `netboot` is running,
+bootparams and NFS exactly as a Sun-3 does. So the boot chain is
+
+```
+RARP  ->  ND (missing)  ->  bootparams  ->  NFS
+ ok        needs ndbootd      works          works
+```
+
+### Why a payload-less client still needs a boot-directory entry
+
+`rarpd` is started with `-b tftpboot`, which makes it check for a file whose
+first eight characters are the client's address in hex **before it answers the
+RARP request at all**. Without one it stays silent, and the machine never gets
+an address — which is the very thing you would be trying to test.
+
+So `03-configure.sh` writes a placeholder for any client whose architecture has
+no boot program, carrying a marker line that says what it is. Nothing ever
+transfers it. A later run recognises the marker and replaces its own file, so
+re-running stays clean. `selftest.sh` reports it as a placeholder rather than
+pretending a transfer proved something.
+
+The NetBSD/sun2 pieces, if this goes further: `installation/netboot/` in the
+10.1 sun2 distribution holds `bootyy` (the ND-loaded second stage) and
+`netboot`. The kernel to put in the client's NFS root would be
+`netbsd-RAMDISK`, hard-linked as `netbsd` and `vmunix`.
 
 ## What needs root, and why only that
 

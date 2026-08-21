@@ -45,11 +45,16 @@ hexip() {
 # The name the PROM actually requests.  sun3 asks for the bare hex string;
 # sun3x appends its architecture.  (NetBSD sun3/INSTALL.txt, "Boot/Install
 # from NFS server".)
+# A sun2 is here only for rarpd's benefit: it loads its bootstrap over ND, not
+# TFTP (see README, "A Sun-2").  rarpd gates its RARP reply on a file in the
+# boot directory whose first eight characters are the hex address, so the entry
+# has to exist even though no TFTP transfer will follow.
 tftpname() {  # tftpname <ip> [arch]
 	case ${2:-sun3} in
 	sun3)  hexip "$1" ;;
 	sun3x) printf '%s.SUN3X' "$(hexip "$1")" ;;
-	*)     die "client arch must be sun3 or sun3x, not '${2:-}'" ;;
+	sun2)  printf '%s.SUN2' "$(hexip "$1")" ;;
+	*)     die "client arch must be sun2, sun3 or sun3x, not '${2:-}'" ;;
 	esac
 }
 
@@ -75,7 +80,7 @@ check_clients() {
 		*) die "client $n: '$m' is not an Ethernet address" ;;
 		esac
 		hexip "$i" >/dev/null
-		case $a in sun3|sun3x) ;; *) die "client $n: arch must be sun3 or sun3x, not '$a'" ;; esac
+		case $a in sun2|sun3|sun3x) ;; *) die "client $n: arch must be sun2, sun3 or sun3x, not '$a'" ;; esac
 	done || exit 1
 }
 

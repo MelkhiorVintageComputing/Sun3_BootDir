@@ -83,6 +83,17 @@ else
 	tmp=$(mktemp -d)
 	while read -r n m i a; do
 		f=$(tftpname "$i" "$a")
+		# A client with no boot program has a placeholder here instead of a
+		# symlink.  It exists only so rarpd will answer; serving it proves
+		# nothing, so check it is present and move on.
+		if [ ! -L "$TFTPBOOT/$f" ]; then
+			if [ -f "$TFTPBOOT/$f" ]; then
+				ok "$f ($n, $a) is a placeholder -- present, so rarpd will answer"
+			else
+				no "$f ($n) is missing, so rarpd will not answer this client"
+			fi
+			continue
+		fi
 		# Deliberately a bare relative name with no path: that is all the
 		# PROM sends, and it is the thing that breaks under a TFTP server
 		# expecting a chroot.

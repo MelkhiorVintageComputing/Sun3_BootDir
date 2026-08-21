@@ -7,6 +7,10 @@
 check_clients
 SERVER_HOST=$(hostname -s)
 
+# Stamped into the tftpboot entries we write for architectures that have no
+# boot program yet, so a later run can recognise and replace its own files.
+PLACEHOLDER_MARK='### Sun3_BootDir placeholder, not a boot program ###'
+
 case $CLIENT_MAC in
 08:00:20:00:00:00) warn "the first CLIENTS entry still has the placeholder MAC" ;;
 esac
@@ -76,9 +80,11 @@ mkdir -p "$ETC" "$TFTPBOOT" "$RUN" "$LOG"
 } >"$ETC/exports"
 
 # --- tftpboot/ --------------------------------------------------------------
-# Drop any name we generated before, so changing CLIENT_IP does not leave a
-# stale entry behind that rarpd would still happily match on.
+# Drop any name we generated before, so changing a client's address does not
+# leave a stale entry behind that rarpd would still happily match on.  Both the
+# symlinks and the placeholders below are ours; nothing else here is touched.
 find "$TFTPBOOT" -maxdepth 1 -type l -delete
+find "$TFTPBOOT" -maxdepth 1 -type f -exec grep -qsF "$PLACEHOLDER_MARK" {} \; -delete
 if [ "$PAYLOAD" = custom ]; then
 	NETBOOT_SRC=$BOOTDIR/$CUSTOM_NETBOOT
 	KERNEL_SRC=$BOOTDIR/$CUSTOM_KERNEL
@@ -101,13 +107,36 @@ fi
 # NFS root, later) is left alone, as is the root of a client you delete from
 # the table.
 clients | while read -r n m i a; do
-	ln -sf "$NETBOOT_SRC" "$TFTPBOOT/$(tftpname "$i" "$a")"
+	f=$TFTPBOOT/$(tftpname "$i" "$a")
 	mkdir -p "$NFSROOT/$n"
-	for k in netbsd netbsd-rd "$(basename "$KERNEL_SRC")"; do
-		rm -f "$NFSROOT/$n/$k"
-		ln "$KERNEL_SRC" "$NFSROOT/$n/$k" 2>/dev/null \
-			|| cp "$KERNEL_SRC" "$NFSROOT/$n/$k"
-	done
+	case $a in
+	sun3|sun3x)
+		ln -sf "$NETBOOT_SRC" "$f"
+		for k in netbsd netbsd-rd "$(basename "$KERNEL_SRC")"; do
+			rm -f "$NFSROOT/$n/$k"
+			ln "$KERNEL_SRC" "$NFSROOT/$n/$k" 2>/dev/null \
+				|| cp "$KERNEL_SRC" "$NFSROOT/$n/$k"
+		done
+		;;
+	*)
+		# No boot program for this architecture yet.  rarpd still needs
+		# an entry here or it will not answer the client's RARP request
+		# at all, so leave something that says what it is.  It is never
+		# transferred: a sun2 fetches its bootstrap over ND.
+		cat >"$f" <<-EOF
+			$PLACEHOLDER_MARK
+			Placeholder for $n ($a) at $i, written by scripts/03-configure.sh.
+
+			rarpd answers a RARP request only when the boot directory holds
+			a file whose first eight characters are the client's address in
+			hex, so this file is what lets $n get an address at all.
+
+			It is not a boot program and nothing will load it.  A sun2 asks
+			for its bootstrap over ND (the Network Disk protocol), which
+			needs ndbootd -- see README, "A Sun-2".
+		EOF
+		;;
+	esac
 done
 
 # ----------------------------------------------------------------------------
@@ -118,7 +147,7 @@ Configured:
   netboot       ${NETBOOT_SRC#"$BOOTDIR"/}
   kernel        ${KERNEL_SRC#"$BOOTDIR"/}
 
-  client    arch   MAC                 IP               TFTP file
+  client    arch   MAC                 IP               boot file
 EOF
 clients | while read -r n m i a; do
 	printf '  %-9s %-6s %-19s %-16s %s\n' "$n" "$a" "$m" "$i" "$(tftpname "$i" "$a")"
