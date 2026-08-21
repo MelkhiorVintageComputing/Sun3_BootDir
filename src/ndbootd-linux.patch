@@ -1,0 +1,150 @@
+Build NetBSD's ndbootd on Linux/glibc.
+
+The daemon itself is portable; what is not is how it finds an interface's
+hardware address, and a handful of things glibc does not have.  Upstream
+anticipates the first part -- ndbootd.h already declares the raw interface as
+three functions, and ndbootd.c #includes one backend at the bottom.
+
+  * hardware address: the BSDs report it in an AF_LINK getifaddrs entry as a
+    struct sockaddr_dl.  Linux uses AF_PACKET and struct sockaddr_ll.  The new
+    branch mirrors the existing one; the #error stays for anything with
+    neither.
+  * struct sockaddr has no sa_len on Linux, so the copy into the ifreq uses
+    sizeof(struct sockaddr).  The interface was selected on AF_INET, so the
+    address is a sockaddr_in and that is the right size.
+  * strlcpy arrived in glibc 2.38; Debian 12 has 2.36.  snprintf does the same
+    job here and needs no shim.
+  * reallocarr(3) is NetBSD's alone.  realloc with an overflow check has the
+    same contract, including leaving the caller's pointer alone on failure.
+  * <time.h> and <netinet/ether.h> are pulled in transitively on NetBSD but
+    not here.
+  * NDBOOTD_PID_FILE becomes overridable so an unprivileged daemon can put its
+    pidfile somewhere it can write.
+
+Every change is conditional.  Building on NetBSD with the upstream config.h is
+unaffected: HAVE_AF_LINK still selects the AF_LINK branch and the BPF backend.
+
+--- ndbootd.h
++++ ndbootd.h
+@@ -85,8 +85,15 @@
+ #ifdef HAVE_NET_IF_DL_H
+ #include <net/if_dl.h>
+ #endif				/* HAVE_NET_IF_DL_H */
++#ifdef HAVE_NETPACKET_PACKET_H
++#include <netpacket/packet.h>
++#endif				/* HAVE_NETPACKET_PACKET_H */
+ #include <arpa/inet.h>
+ #include <ifaddrs.h>
++#include <time.h>
++#ifdef HAVE_NETINET_ETHER_H
++#include <netinet/ether.h>
++#endif				/* HAVE_NETINET_ETHER_H */
+ 
+ /* macros: */
+ #ifdef __STDC__
+@@ -115,7 +122,31 @@
+ #else				/* !_NDBOOTD_DO_DEBUG */
+ #define _NDBOOTD_DEBUG(x)
+ #endif				/* !_NDBOOTD_DO_DEBUG */
++#ifndef NDBOOTD_PID_FILE
+ #define NDBOOTD_PID_FILE "/var/run/ndbootd.pid"
++#endif
++
++#ifdef NDBOOTD_NEED_REALLOCARR
++/* reallocarr(3) is NetBSD's; it resizes in place and leaves the caller's
++   pointer alone when it fails.  realloc plus an overflow check is the same
++   thing everywhere else. */
++static int
++ndbootd_reallocarr(void **ptr, size_t number, size_t size)
++{
++	void *new_buffer;
++
++	if (number != 0 && size != 0 && number > ((size_t) -1) / size) {
++		return (ENOMEM);
++	}
++	new_buffer = realloc(*ptr, number * size);
++	if (new_buffer == NULL && number != 0 && size != 0) {
++		return (errno != 0 ? errno : ENOMEM);
++	}
++	*ptr = new_buffer;
++	return (0);
++}
++#define reallocarr(p, n, s) ndbootd_reallocarr((void **) (p), (n), (s))
++#endif				/* NDBOOTD_NEED_REALLOCARR */
+ 
+ #define NDBOOTD_OFFSETOF(t, m) (((char *) &(((t *) NULL)-> m)) - ((char *) ((t *) NULL)))
+ 
+--- ndbootd.c
++++ ndbootd.c
+@@ -208,6 +208,9 @@
+ #ifdef HAVE_AF_LINK
+ 	struct sockaddr_dl *sadl;
+ #endif				/* HAVE_AF_LINK */
++#ifdef HAVE_AF_PACKET
++	struct sockaddr_ll *sall;
++#endif				/* HAVE_AF_PACKET */
+ 	struct ndbootd_interface *interface;
+ 	struct ifaddrs *ifap, *ifa, *ifa_user;
+ 
+@@ -273,14 +276,49 @@
+ 	sadl = (struct sockaddr_dl *)ifa->ifa_addr;
+ 	memcpy(interface->ndbootd_interface_ether, LLADDR(sadl), sadl->sdl_alen);
+ 
+-#else				/* !HAVE_AF_LINK */
+-#error "must have AF_LINK for now"
++#elif defined(HAVE_AF_PACKET)		/* !HAVE_AF_LINK */
++
++	/* Linux reports hardware addresses in AF_PACKET entries, as a
++	 * struct sockaddr_ll.  Otherwise this is upstream's AF_LINK loop. */
++	for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
++		if (ifa->ifa_addr == NULL
++		    || ifa->ifa_addr->sa_family != AF_PACKET) {
++			continue;
++		}
++		/* if this is the hardware address we want */
++		if (!strcmp(ifa->ifa_name, ifa_user->ifa_name)) {
++			break;
++		}
++	}
++	if (ifa == NULL) {
++		freeifaddrs(ifap);
++		free(interface);
++		errno = ENOENT;
++		return (NULL);
++	}
++	/* copy out the Ethernet address: */
++	sall = (struct sockaddr_ll *) ifa->ifa_addr;
++	if (sall->sll_halen != ETHER_ADDR_LEN) {
++		freeifaddrs(ifap);
++		free(interface);
++		errno = EAFNOSUPPORT;
++		return (NULL);
++	}
++	memcpy(interface->ndbootd_interface_ether, sall->sll_addr, ETHER_ADDR_LEN);
++
++#else				/* !HAVE_AF_LINK && !HAVE_AF_PACKET */
++#error "must have AF_LINK or AF_PACKET"
+ #endif				/* !HAVE_AF_LINK */
+ 
+ 	/* finish this interface and return it: */
+-	strlcpy(ifr.ifr_name, ifa_user->ifa_name, sizeof(ifr.ifr_name));
++	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifa_user->ifa_name);
++#ifdef HAVE_SOCKADDR_SA_LEN
+ 	assert(sizeof(ifr.ifr_addr) >= ifa_user->ifa_addr->sa_len);
+ 	memcpy(&ifr.ifr_addr, ifa_user->ifa_addr, ifa_user->ifa_addr->sa_len);
++#else				/* !HAVE_SOCKADDR_SA_LEN */
++	/* the interface was selected on AF_INET, so this is a sockaddr_in: */
++	memcpy(&ifr.ifr_addr, ifa_user->ifa_addr, sizeof(struct sockaddr));
++#endif				/* !HAVE_SOCKADDR_SA_LEN */
+ 	interface->ndbootd_interface_ifreq = (struct ifreq *) ndbootd_memdup(&ifr, SIZEOF_IFREQ(&ifr));
+ 	interface->ndbootd_interface_fd = -1;
+ 	freeifaddrs(ifap);
+@@ -1004,4 +1042,8 @@
+ 	/* NOTREACHED */
+ }
+ /* the raw Ethernet access code: */
++#ifdef HAVE_AF_PACKET
++#include "ndbootd-packet.c"
++#else				/* !HAVE_AF_PACKET */
+ #include "config/ndbootd-bpf.c"
++#endif				/* !HAVE_AF_PACKET */

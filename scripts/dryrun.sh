@@ -23,6 +23,10 @@ if is_running rpcbind; then
 	die "the live stack is running -- run scripts/stop.sh first"
 fi
 
+# Worked out here rather than inside the heredoc, where the quoting needed to
+# get an awk program through unscathed is not worth it.
+SUN2_MAC=$(clients | awk '$4 == "sun2" { print $2; exit }')
+
 say "entering a private user+network namespace"
 # --pid --fork --kill-child means every daemon started inside dies with this
 # script, even if it is interrupted.  Without it a leftover rpcbind keeps the
@@ -38,6 +42,7 @@ TFTPBOOT='$TFTPBOOT'
 NAME='$(tftpname "$CLIENT_IP" "$CLIENT_ARCH")'
 CLIENT_IP='$CLIENT_IP'
 SERVER_IP='$SERVER_IP'
+SUN2_MAC='$SUN2_MAC'
 INNER_SCRIPT=1
 $(cat <<'SCRIPT'
 
@@ -113,6 +118,39 @@ else
 fi
 
 echo
+echo 'ND (Sun-2) over a veth pair'
+if [ -z "$SUN2_MAC" ]; then
+	echo '  SKIP  no sun2 client configured'
+elif [ ! -x "$SBIN/ndbootd" ]; then
+	no 'sbin/ndbootd missing -- run scripts/01-build-ndbootd.sh'
+elif [ ! -f "$BOOTDIR/payload/sun2-bootyy" ]; then
+	no 'payload/sun2-bootyy missing -- run scripts/02-fetch-payload.sh'
+else
+	# A veth pair is the whole point here: ndbootd needs a real interface
+	# to open an AF_PACKET socket on, and inside this namespace we can make
+	# one.  This is what actually exercises src/ndbootd-packet.c -- the
+	# capability the real daemon needs is not required in here.
+	ip link add nd0 type veth peer name nd1 \
+		&& ip addr add "$SERVER_IP/24" dev nd0 \
+		&& ip link set nd0 up && ip link set nd1 up
+	start ndbootd "$SBIN/ndbootd" -d -i nd0 -s "$TFTPBOOT" \
+		"$BOOTDIR/payload/sun2-bootyy" || exit 1
+	# Block 0 is the label; blocks 1-15 are the first stage, and block 16
+	# onwards is the second stage ndbootd finds by hex name in tftpboot.
+	for blk in 1 16; do
+		if out=$(python3 "$BOOTDIR/tools/nd-probe.py" --interface nd1 \
+				--client-mac "$SUN2_MAC" --block "$blk" 2>&1); then
+			ok "ND read of block $blk answered"
+			printf '%s\n' "$out" | sed 's/^/        /'
+		else
+			no "ND read of block $blk failed:"
+			printf '%s\n' "$out" | sed 's/^/        /'
+			sed 's/^/        /' "$LOG/dryrun-ndbootd.log"
+		fi
+	done
+fi
+
+echo
 echo 'bootparams WHOAMI/GETFILE over PMAPPROC_CALLIT'
 if out=$(python3 "$BOOTDIR/tools/bp-probe.py" --server 127.0.0.1 "$CLIENT_IP" 2>&1); then
 	ok 'bootparamd answered'
@@ -136,7 +174,7 @@ fi
 
 echo
 if [ "$fail" -eq 0 ]; then
-	echo 'Dry run passed: TFTP, portmap+bootparams and NFSv3 all behave.'
+	echo 'Dry run passed: TFTP, ND, portmap+bootparams and NFSv3 all behave.'
 	echo 'What is left to prove on the real network is RARP, and that these'
 	echo 'same daemons can bind ports 69 and 111 outside the namespace --'
 	echo 'i.e. root/grant-privileges.sh.'

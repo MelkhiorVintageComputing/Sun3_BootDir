@@ -4,7 +4,10 @@
 #   start.sh          everything (milestone M3: the Sun-3 boots a kernel)
 #   start.sh m1       rarpd + atftpd only -- the PROM downloads netboot
 #   start.sh m2       + rpcbind + bootparamd -- netboot finds its root
-#   start.sh <name>   just one of: rarpd atftpd rpcbind bootparamd unfsd
+#   start.sh <name>   just one of: rarpd ndbootd atftpd rpcbind bootparamd unfsd
+#
+# ndbootd is started only when the table has a sun2 in it; nothing else needs
+# it, and it will not run without a first-stage boot program to serve.
 #
 # Bringing the stack up in stages makes a failure point at one protocol
 # instead of five.
@@ -70,6 +73,53 @@ start_rarpd() {
 	fi
 }
 
+start_ndbootd() {
+	# Only a Sun-2 speaks ND, so there is nothing to run without one.
+	if [ -z "$(clients | awk '$4 == "sun2"')" ]; then
+		say "no sun2 client configured; not starting ndbootd"
+		return 0
+	fi
+	sun2_ifs=$(clients | awk '$4 == "sun2" { print $3 }' | while read -r ip; do
+		route_dev "$ip" || true
+		echo
+	done | sed '/^$/d' | sort -u)
+	# Everything below is a warn-and-skip rather than a die: ndbootd serves
+	# only the Sun-2, and a Sun-3 stack should still come up without it.
+	if [ ! -x "$SBIN/ndbootd" ]; then
+		warn "sbin/ndbootd missing -- run scripts/01-build-ndbootd.sh; no sun2 can boot"
+		return 0
+	fi
+	case $(getcap "$SBIN/ndbootd" 2>/dev/null) in
+	*cap_net_raw*) ;;
+	*)
+		warn "sbin/ndbootd lacks cap_net_raw, so no sun2 can get an address."
+		warn "  An administrator must run root/grant-privileges.sh again"
+		warn "  (ndbootd is new, and capabilities do not survive a rebuild)."
+		return 0 ;;
+	esac
+	boot1=$BOOTDIR/payload/sun2-bootyy
+	if [ ! -f "$boot1" ]; then
+		warn "$boot1 missing -- run scripts/02-fetch-payload.sh; no sun2 can boot"
+		return 0
+	fi
+
+	# ndbootd binds one interface per instance and has no -a.  With every
+	# sun2 on one segment that is fine; more than one would need more than
+	# one instance, which nothing here manages yet.
+	set -- $sun2_ifs
+	if [ $# -eq 0 ]; then
+		warn "no sun2 client is reachable on any of \"$SERVER_IF\"; not starting ndbootd"
+		return 0
+	fi
+	if [ $# -gt 1 ]; then
+		warn "sun2 clients span $* -- ndbootd serves one interface, using $1"
+	fi
+	# -s tftpboot: find each client's second stage by its hex name there,
+	#    exactly as atftpd does for a Sun-3.
+	# The trailing argument is the first stage, ND blocks 1-15.
+	spawn ndbootd "$SBIN/ndbootd" -d -i "$1" -s "$TFTPBOOT" "$boot1"
+}
+
 start_atftpd() {
 	need_cap atftpd cap_net_bind_service
 	# The 1986 PROM does not do RFC 2347 option negotiation; refuse to
@@ -119,15 +169,16 @@ start_unfsd() {
 }
 
 case "${1:-all}" in
-m1)         start_rarpd; start_atftpd ;;
-m2)         start_rarpd; start_atftpd; start_rpcbind; start_bootparamd ;;
-m3|all)     start_rarpd; start_atftpd; start_rpcbind; start_bootparamd; start_unfsd ;;
+m1)         start_rarpd; start_ndbootd; start_atftpd ;;
+m2)         start_rarpd; start_ndbootd; start_atftpd; start_rpcbind; start_bootparamd ;;
+m3|all)     start_rarpd; start_ndbootd; start_atftpd; start_rpcbind; start_bootparamd; start_unfsd ;;
 rarpd)      start_rarpd ;;
+ndbootd)    start_ndbootd ;;
 atftpd)     start_atftpd ;;
 rpcbind)    start_rpcbind ;;
 bootparamd) start_bootparamd ;;
 unfsd)      start_unfsd ;;
-*) die "usage: $0 [m1|m2|m3|all|rarpd|atftpd|rpcbind|bootparamd|unfsd]" ;;
+*) die "usage: $0 [m1|m2|m3|all|rarpd|ndbootd|atftpd|rpcbind|bootparamd|unfsd]" ;;
 esac
 
 echo

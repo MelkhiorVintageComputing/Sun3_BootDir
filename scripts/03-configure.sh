@@ -95,6 +95,19 @@ fi
 [ -f "$NETBOOT_SRC" ] || die "$NETBOOT_SRC missing -- run scripts/02-fetch-payload.sh first"
 [ -f "$KERNEL_SRC" ]  || die "$KERNEL_SRC missing -- run scripts/02-fetch-payload.sh first"
 
+# An architecture with no boot program still gets its name reserved here, with
+# a marker line so a later run can recognise and replace its own file.
+write_placeholder() {  # write_placeholder <path> <name> <arch> <ip>
+	cat >"$1" <<-EOF
+		$PLACEHOLDER_MARK
+		Placeholder for $2 ($3) at $4, written by scripts/03-configure.sh.
+
+		There is no boot program for this architecture here yet, so nothing
+		will load this file.  It exists to reserve the name and to show the
+		client in this directory.
+	EOF
+}
+
 # --- tftpboot/<HEX> and nfsroot/<client>/ -----------------------------------
 # netboot's default kernel name depends on how the PROM is invoked, so provide
 # the usual spellings.  All refer to the one kernel we fetched.
@@ -106,6 +119,9 @@ fi
 # Only the names we manage are removed; anything else in a client root (a real
 # NFS root, later) is left alone, as is the root of a client you delete from
 # the table.
+SUN2_NETBOOT=$BOOTDIR/payload/sun2-netboot
+SUN2_BOOT1=$BOOTDIR/payload/sun2-bootyy
+
 clients | while read -r n m i a; do
 	f=$TFTPBOOT/$(tftpname "$i" "$a")
 	mkdir -p "$NFSROOT/$n"
@@ -118,24 +134,24 @@ clients | while read -r n m i a; do
 				|| cp "$KERNEL_SRC" "$NFSROOT/$n/$k"
 		done
 		;;
+	sun2)
+		# ndbootd serves the second stage out of this same directory,
+		# by the same hex-plus-suffix name a Sun-3 would TFTP.  The
+		# first stage is not here: it is the whole of ND blocks 1-15,
+		# passed to ndbootd on its command line by start.sh.
+		#
+		# No kernel: the one we fetch is from the sun3 distribution and
+		# a Sun-2 cannot run it.  netboot will get as far as mounting
+		# the root and then find nothing it can load, which is the
+		# expected state until a sun2 kernel is added.
+		if [ -f "$SUN2_NETBOOT" ]; then
+			ln -sf "$SUN2_NETBOOT" "$f"
+		else
+			write_placeholder "$f" "$n" "$a" "$i"
+		fi
+		;;
 	*)
-		# No boot program for this architecture yet.  Keep the name
-		# reserved so the directory shows every client, and so nothing
-		# else claims it; leave something that says what it is.
-		cat >"$f" <<-EOF
-			$PLACEHOLDER_MARK
-			Placeholder for $n ($a) at $i, written by scripts/03-configure.sh.
-
-			It is not a boot program and nothing here will load it.  A Sun-2
-			does no RARP and no TFTP: it fetches its bootstrap over ND, the
-			Network Disk protocol, which needs ndbootd.  Nothing in this
-			directory speaks ND -- see README, "A Sun-2".
-
-			This name is the one ndbootd would look for if it were serving
-			second-stage boot programs out of a directory, so replacing this
-			file with the real NetBSD/sun2 netboot is the right move once
-			there is an ND server to hand it over.
-		EOF
+		write_placeholder "$f" "$n" "$a" "$i"
 		;;
 	esac
 done

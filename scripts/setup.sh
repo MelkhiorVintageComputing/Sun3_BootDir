@@ -6,7 +6,8 @@
 
 . "$(dirname -- "$0")/common.sh"
 
-for s in 00-fetch-packages 01-build-rpcbind 01-build-atftpd 01-build-unfs3 02-fetch-payload 03-configure; do
+for s in 00-fetch-packages 01-build-rpcbind 01-build-atftpd 01-build-unfs3 \
+         01-build-ndbootd 02-fetch-payload 03-configure; do
 	echo
 	echo "########## $s"
 	"$BOOTDIR/scripts/$s.sh"

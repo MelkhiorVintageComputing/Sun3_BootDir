@@ -10,9 +10,10 @@
 /pkg/
 /payload/
 
-# Build trees (scripts/01-build-*.sh).  The patches applied to them are tracked.
-/src/*
-!/src/*.patch
+# Build trees (scripts/01-build-*.sh) are directories and are all generated.
+# Everything else in src/ -- the patches, and the sources we wrote ourselves --
+# is tracked, so match only directories here.
+/src/*/
 
 # Binaries, and the capabilities they carry, come from setup.sh + grant-privileges.sh
 /sbin/

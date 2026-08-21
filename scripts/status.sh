@@ -7,12 +7,12 @@
 
 if [ "${1:-}" = "-f" ]; then
 	say "tailing all logs (Ctrl-C to stop)"
-	exec tail -n 20 -F "$LOG"/rarpd.log "$LOG"/atftpd.log "$LOG"/rpcbind.log \
-		"$LOG"/bootparamd.log "$LOG"/unfsd.log 2>/dev/null
+	exec tail -n 20 -F "$LOG"/rarpd.log "$LOG"/ndbootd.log "$LOG"/atftpd.log \
+		"$LOG"/rpcbind.log "$LOG"/bootparamd.log "$LOG"/unfsd.log 2>/dev/null
 fi
 
 printf 'daemon      pid      state\n'
-for name in rarpd atftpd rpcbind bootparamd unfsd; do
+for name in rarpd ndbootd atftpd rpcbind bootparamd unfsd; do
 	if is_running "$name"; then
 		printf '%-11s %-8s running\n' "$name" "$(cat "$RUN/$name.pid")"
 	else
@@ -22,7 +22,7 @@ done
 
 echo
 echo 'capabilities:'
-for b in rarpd atftpd rpcbind; do
+for b in rarpd ndbootd atftpd rpcbind; do
 	if [ -x "$SBIN/$b" ]; then
 		cap=$(getcap "$SBIN/$b" 2>/dev/null)
 		printf '  %-10s %s\n' "$b" "${cap:-NONE -- run root/grant-privileges.sh}"

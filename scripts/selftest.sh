@@ -16,7 +16,14 @@ skip() { printf '  SKIP  %s\n' "$*"; }
 NAME=$(tftpname "$CLIENT_IP" "$CLIENT_ARCH")
 
 echo '1. capabilities'
-for pair in 'rarpd cap_net_raw' 'atftpd cap_net_bind_service' 'rpcbind cap_net_bind_service'; do
+caps='rarpd cap_net_raw:atftpd cap_net_bind_service:rpcbind cap_net_bind_service'
+# ndbootd only exists when there is a Sun-2 to serve.
+if [ -n "$(clients | awk '$4 == "sun2"')" ]; then
+	caps="$caps:ndbootd cap_net_raw"
+fi
+old_ifs=$IFS; IFS=:
+for pair in $caps; do
+	IFS=$old_ifs
 	b=${pair% *}; c=${pair#* }
 	if [ ! -x "$SBIN/$b" ]; then
 		no "sbin/$b is missing (run scripts/00-fetch-packages.sh)"
@@ -25,7 +32,9 @@ for pair in 'rarpd cap_net_raw' 'atftpd cap_net_bind_service' 'rpcbind cap_net_b
 	else
 		no "sbin/$b lacks $c (run root/grant-privileges.sh as root)"
 	fi
+	IFS=:
 done
+IFS=$old_ifs
 if [ "$(readlink -f /etc/ethers 2>/dev/null)" = "$ETC/ethers" ]; then
 	ok "/etc/ethers -> etc/ethers"
 else
@@ -61,6 +70,13 @@ echo '2. daemons'
 for d in rarpd atftpd rpcbind bootparamd unfsd; do
 	if is_running "$d"; then ok "$d running"; else no "$d not running"; fi
 done
+if [ -n "$(clients | awk '$4 == "sun2"')" ]; then
+	if is_running ndbootd; then
+		ok 'ndbootd running (a sun2 is configured)'
+	else
+		no 'ndbootd not running, so no sun2 can get an address'
+	fi
+fi
 
 echo
 echo '3. listening sockets'

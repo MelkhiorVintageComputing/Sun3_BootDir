@@ -4,6 +4,8 @@ Everything needed to boot a Sun-3 (68020: 3/50, 3/60, 3/110, 3/150, 3/160,
 3/260) over Ethernet from this Debian host, plus the scripts to rebuild it all
 from an empty directory.
 
+Also boots a Sun-2, which needs an entirely different protocol; see "A Sun-2".
+
 Almost nothing here runs with privilege. Exactly one script needs root, it is
 about ten lines long, and it is run once.
 
@@ -162,9 +164,10 @@ reports it as `(no carrier yet)` rather than a failure.
 | `scripts/01-build-rpcbind.sh` | none | builds patched upstream rpcbind |
 | `scripts/01-build-atftpd.sh` | none | builds patched upstream atftpd |
 | `scripts/01-build-unfs3.sh` | none | builds unfs3 |
+| `scripts/01-build-ndbootd.sh` | none | builds ndbootd with a Linux AF_PACKET backend |
 | `scripts/02-fetch-payload.sh` | none | fetches NetBSD/sun3 netboot + kernel, checksummed |
 | `scripts/03-configure.sh` | none | generates `etc/`, `tftpboot/`, `nfsroot/` |
-| `root/grant-privileges.sh` | **root, once** | three `setcap`s and one symlink |
+| `root/grant-privileges.sh` | **root, once** | four `setcap`s and one symlink |
 | `scripts/start.sh` | none | starts the daemons (`m1`/`m2`/`m3`, or one by name) |
 | `scripts/stop.sh` | none | stops them |
 | `scripts/status.sh` | none | what is running, listening, registered; `-f` tails logs |
@@ -176,78 +179,117 @@ Bringing it up in stages makes a failure point at one protocol instead of five.
 
 ## A Sun-2
 
-`sun2_f_m` is in the table, but this setup cannot boot it, and the gap is
-bigger than a missing kernel. From `ndbootd(8)`:
+A Sun-2 shares almost nothing with the Sun-3 boot chain. From `ndbootd(8)`:
 
 > The Sun 2 PROMs can only use ND to boot over the network. (Later, the Sun 3
 > PROMs would use RARP and TFTP to boot over the network.) [...] **Sun 2 PROMs
 > don't do RARP**, but they do learn their IP address from the first ND
 > response they receive from the server.
 
-So a Sun-2 shares almost nothing with the Sun-3 boot chain:
-
 ```
               Sun-3                     Sun-2
-  address     RARP        rarpd         from the first ND reply
-  bootstrap   TFTP        atftpd        ND (IP protocol 77)     -- nothing here
-  root        bootparams + NFS          bootparams + NFS        -- once netboot runs
+  address     RARP        rarpd         out of the first ND reply
+  bootstrap   TFTP        atftpd        ND (IP protocol 77)   ndbootd
+  root        bootparams + NFS          bootparams + NFS      (same daemons)
 ```
 
-`rarpd` will never see a packet from it. On the wire the requests look like
-this, and `tcpdump` cannot name the protocol because Debian's
-`/etc/protocols` has no entry for 77:
+`rarpd` will never see a packet from a Sun-2. Its requests look like this, and
+`tcpdump` cannot name the protocol because Debian's `/etc/protocols` has no
+entry for 77 — IANA assigns it to `SUN-ND`:
 
 ```
 08:00:20:01:06:e0 > ff:ff:ff:ff:ff:ff, ethertype IPv4 (0x0800),
     (ttl 4, id 0, proto unknown (77), length 48)
 ```
 
-IANA assigns protocol 77 to `SUN-ND`. Seeing these is the machine working
-correctly; there is simply nobody answering.
+### ndbootd, and the AF_PACKET backend
 
-### What serving it would take
+`ndbootd` is NetBSD's ND server and is not packaged for Debian, so
+`scripts/01-build-ndbootd.sh` builds it from the NetBSD tree, pinned to a
+commit and checksum-verified. It needs one thing Linux does not provide:
+its raw interface is `/dev/bpf`.
 
-`ndbootd` is NetBSD's ND server, about 1000 lines, and it is not packaged for
-Debian. Its own README says it "has only been compiled and tested under NetBSD
-with BPF support, although [...] the raw interface support is broken out, which
-should allow for reasonable" porting — and that is the whole job: the
-link-layer backend lives alone in `config/ndbootd-bpf.c`, 313 lines of
-`/dev/bpf` `ioctl`s, and Linux needs an `AF_PACKET` equivalent. Link-layer
-access is unavoidable because the client has no address until the server
-replies to its Ethernet address.
+Upstream anticipates this. `ndbootd.h` declares the whole raw interface as
+three functions and `ndbootd.c` `#include`s one backend at the bottom, so
+`src/ndbootd-packet.c` supplies them with `AF_PACKET`:
 
-Two things already fit, if it is ever done:
+| | BPF | AF_PACKET |
+|---|---|---|
+| open | `open(/dev/bpf)`, `BIOCSETIF`, `BIOCSETF` | `socket(AF_PACKET, SOCK_RAW)`, `bind`, `SO_ATTACH_FILTER` |
+| filter | `struct bpf_insn` | `struct sock_filter` — identical encoding, reused verbatim |
+| read | one `read()` returns many frames behind `bpf_hdr`s | one `recvfrom()` per frame |
+| ignoring our own | compare source address | `PACKET_IGNORE_OUTGOING`, or `PACKET_OUTGOING` |
+| write | `write()` | `sendto()` with a `sockaddr_ll` |
 
-* `AF_PACKET` needs `CAP_NET_RAW` — the capability `rarpd` already carries, so
-  it would be one more line in `root/grant-privileges.sh`, not a new kind of
-  privilege.
-* `ndbootd -s <directory>` finds a client's second-stage program by the same
-  hex-plus-suffix name a Sun-3 TFTPs by, and reads `/etc/ethers` for its client
-  list. `03-configure.sh` already generates `tftpboot/C0A8007B.SUN2` and the
-  ethers entry, so the configuration side is done.
+`src/ndbootd-linux.patch` covers the rest: hardware addresses come from an
+`AF_PACKET` `getifaddrs` entry rather than `AF_LINK`, `struct sockaddr` has no
+`sa_len`, `strlcpy` predates glibc 2.38, `reallocarr(3)` is NetBSD's alone, and
+`<time.h>` and `<netinet/ether.h>` are not pulled in transitively. Every change
+is conditional, so building on NetBSD is unaffected.
 
-The NetBSD/sun2 pieces: `installation/netboot/` in the 10.1 distribution holds
-`bootyy` (first stage, ND blocks 1-15) and `netboot` (second stage, block 16
-onwards). Both must be raw binaries with executable headers stripped. The
-kernel for the client's NFS root is `netbsd-RAMDISK`, hard-linked as `netbsd`
-and `vmunix`.
+Link-layer access is not an optimisation: the client has no IP address until it
+reads one out of our first reply, so there is no address to send to. That is
+why `ndbootd` needs `CAP_NET_RAW` — the same capability `rarpd` already has, so
+it is one more line in `root/grant-privileges.sh` rather than a new kind of
+privilege.
 
-Until then `03-configure.sh` writes a marked placeholder at the client's boot
-name so the directory shows every machine and the name is reserved;
-`selftest.sh` reports it as a placeholder rather than claiming a transfer
-proved anything.
+### What ndbootd serves
+
+ND exports what the client believes is a raw disk, `/dev/ndp0`:
+
+```
+block 0       a Sun disklabel, ignored by the PROM
+blocks 1-15   the first stage    payload/sun2-bootyy   (start.sh passes it)
+block 16 on   the second stage   tftpboot/C0A8007B.SUN2 (ndbootd -s finds it)
+```
+
+The second stage is found by the same hex-plus-suffix name a Sun-3 TFTPs by, so
+`03-configure.sh` generates it exactly as it does for the others, and
+`etc/ethers` is shared with `rarpd`. Both programs must be raw binaries with
+executable headers stripped, which is how NetBSD ships them.
+
+`start.sh` runs `ndbootd` only when the table has a `sun2` in it, and treats
+every problem with it as a warning rather than an error, so a missing capability
+or payload cannot stop the Sun-3 stack from coming up.
+
+### Testing it without a Sun-2
+
+`tools/nd-probe.py` sends an ND read request exactly as the PROM does — zero
+source and destination addresses, broadcast — and reports the reply.
+`scripts/dryrun.sh` builds a veth pair inside its namespace and runs the real
+`ndbootd` on it, which is what actually exercises the AF_PACKET backend, and
+needs no privilege at all:
+
+```
+  PASS  ND read of block 1 answered
+          <- READ|WAIT|DONE from 192.168.0.31 to 192.168.0.123
+             512 bytes of data, first 16: 46fc270041fafffa43f900240000b3c8
+  PASS  ND read of block 16 answered
+```
+
+`46fc 2700` is `move #$2700,sr` — the first instruction of a 68000 boot
+program, so that really is `bootyy` coming back.
+
+### What is still missing
+
+There is no sun2 kernel. The one this fetches is from the sun3 distribution and
+a Sun-2 cannot run it, so `netboot` will get as far as mounting its root and
+find nothing to load. Fixing that means fetching `netbsd-RAMDISK` from the sun2
+distribution and hard-linking it as `netbsd` and `vmunix` in
+`nfsroot/sun2_f_m/`, per NetBSD 10.1 `sun2/INSTALL.txt`.
 
 ## What needs root, and why only that
 
 | daemon | needs | why |
 |---|---|---|
 | `rarpd` | `cap_net_raw` | RARP replies come from an `AF_PACKET` socket |
+| `ndbootd` | `cap_net_raw` | a Sun-2 has no address to reply to, so ND is link-layer |
 | `atftpd` | `cap_net_bind_service` | TFTP is udp/69 |
 | `rpcbind` | `cap_net_bind_service` | the portmapper is udp+tcp/111 |
 | `rpc.bootparamd` | nothing | ephemeral port, registers with rpcbind |
 | `unfsd` | nothing | 2049 is already unprivileged |
 
-`root/grant-privileges.sh` grants those three capabilities and points
+`root/grant-privileges.sh` grants those capabilities and points
 `/etc/ethers` at `etc/ethers`. The symlink is there because `rarpd` has no
 option to relocate its MAC table; with it, changing the Sun-3's address never
 needs root again.
@@ -402,9 +444,10 @@ deciding then, with the boot chain already proven.
 config/     the one file you edit
 scripts/    everything unprivileged
 root/       the one thing that is not
-tools/      protocol probes (bp-probe.py, nfs-probe.py, tftp-bcast-probe.py)
+tools/      protocol probes (bp-probe.py, nfs-probe.py, tftp-bcast-probe.py,
+            nd-probe.py)
             and sun3conf.py, which reads the client table for them
-sbin/       the daemons; three carry capabilities
+sbin/       the daemons; four carry capabilities
 etc/        generated configuration
 tftpboot/   what the PROM downloads
 payload/    netboot and kernels as fetched

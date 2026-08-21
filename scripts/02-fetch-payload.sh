@@ -66,6 +66,22 @@ say "decompressing $KERNEL"
 gzip -dc "$DIST/$KERNEL.gz" >"$BOOTDIR/payload/$KERNEL.new"
 mv "$BOOTDIR/payload/$KERNEL.new" "$BOOTDIR/payload/$KERNEL"
 
+# --- sun2 boot programs -----------------------------------------------------
+# A Sun-2 loads these over ND, not TFTP, so they are only worth fetching when
+# the table has a sun2 in it.  bootyy is the first stage that lives in blocks
+# 1-15 of the disk ndbootd exports; netboot is the second stage, from block 16.
+# Both are already raw binaries, as ndbootd requires.
+SUN2_FILES=
+if clients | awk '$4 == "sun2" { found = 1 } END { exit !found }'; then
+	SUN2_BASE=https://cdn.netbsd.org/pub/NetBSD/NetBSD-$NETBSD_RELEASE/sun2
+	say "a sun2 client is configured; fetching its ND boot programs"
+	for f in bootyy netboot; do
+		fetch "$SUN2_BASE/installation/netboot/$f" "$DIST/sun2-$f"
+		cp -f "$DIST/sun2-$f" "$BOOTDIR/payload/sun2-$f"
+	done
+	SUN2_FILES='sun2-bootyy sun2-netboot'
+fi
+
 # --- optional miniroot ------------------------------------------------------
 if [ "${NETBSD_FETCH_MINIROOT:-no}" = yes ]; then
 	fetch "$BASE/installation/miniroot/miniroot.fs.gz" "$DIST/miniroot.fs.gz"
@@ -80,7 +96,8 @@ if [ -f "$MANIFEST" ]; then
 	( cd "$BOOTDIR/payload" && sha256sum -c --ignore-missing SHA256SUMS ) \
 		|| die "payload changed unexpectedly; delete payload/SHA256SUMS if that was intentional"
 else
-	( cd "$BOOTDIR/payload" && sha256sum netboot "$KERNEL" >SHA256SUMS )
+	# shellcheck disable=SC2086
+	( cd "$BOOTDIR/payload" && sha256sum netboot "$KERNEL" $SUN2_FILES >SHA256SUMS )
 	say "recorded payload/SHA256SUMS"
 fi
 
