@@ -49,6 +49,10 @@ clients | while read -r n m i a p; do
 		"$(readlink -f "$TFTPBOOT/$f" 2>/dev/null || echo 'MISSING -- run 03-configure.sh')"
 	if directly_reachable "$i"; then
 		printf '              %-14s on %s\n' "$n" "$(route_dev "$i")"
+		if [ "$p" = sunos ] && ! oldstyle_bcast_ok "$i"; then
+			printf '              %-14s MISSING %s -- run root/allow-oldstyle-broadcast.sh\n' \
+				"$n" "$(oldstyle_bcast_addr "$i" 2>/dev/null || echo 'old-style broadcast')"
+		fi
 	else
 		printf '              %-14s NOT reachable on any of "%s": %s\n' \
 			"$n" "$SERVER_IF" "$(ip -4 route get "$i" 2>&1 | head -1)"

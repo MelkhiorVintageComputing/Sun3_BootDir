@@ -123,6 +123,47 @@ iface_carrier() {  # iface_carrier <interface>
 	[ "$(cat "/sys/class/net/$1/carrier" 2>/dev/null)" = 1 ]
 }
 
+# SunOS's /boot has no netmask, so it broadcasts its bootparams request to the
+# 4.2BSD all-zeros address -- the network address, not 255.255.255.255.  Linux
+# installs a broadcast route for the all-ones form only, so that datagram is
+# dropped in the input path and no daemon sees it at all.
+# root/allow-oldstyle-broadcast.sh adds the address; this is how the checks
+# notice it is missing.
+netaddr() {  # netaddr <ip> <prefixlen>
+	IFS='.' read -r _b1 _b2 _b3 _b4 <<-EOF
+	$1
+	EOF
+	_bip=$(( (_b1 << 24) | (_b2 << 16) | (_b3 << 8) | _b4 ))
+	if [ "$2" -ge 32 ]; then
+		_bmask=4294967295
+	else
+		_bmask=$(( (4294967295 << (32 - $2)) & 4294967295 ))
+	fi
+	_bnet=$(( _bip & _bmask ))
+	printf '%d.%d.%d.%d' $(( (_bnet >> 24) & 255 )) $(( (_bnet >> 16) & 255 )) \
+		$(( (_bnet >> 8) & 255 )) $(( _bnet & 255 ))
+}
+
+iface_prefix() {  # iface_prefix <interface>
+	ip -o -4 addr show dev "$1" 2>/dev/null \
+		| awk '{ split($4, a, "/"); if (a[2] != "" && a[2] != 32) { print a[2]; exit } }'
+}
+
+# Prints the all-zeros broadcast address a SunOS client would use.
+oldstyle_bcast_addr() {  # oldstyle_bcast_addr <client-ip>
+	_bdev=$(route_dev "$1") || return 1
+	_bpfx=$(iface_prefix "$_bdev") || return 1
+	[ -n "$_bpfx" ] || return 1
+	netaddr "$1" "$_bpfx"
+}
+
+# Whether this host would accept a datagram sent to that address.
+oldstyle_bcast_ok() {  # oldstyle_bcast_ok <client-ip>
+	_baddr=$(oldstyle_bcast_addr "$1") || return 1
+	ip -4 route show table local 2>/dev/null \
+		| grep -qE "^(local|broadcast) $_baddr "
+}
+
 directly_reachable() {  # directly_reachable <ip>
 	_d=$(route_dev "$1") || return 1
 	[ -n "$_d" ] || return 1

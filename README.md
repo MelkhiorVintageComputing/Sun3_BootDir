@@ -6,8 +6,8 @@ from an empty directory.
 
 Also boots a Sun-2, which needs an entirely different protocol; see "A Sun-2".
 
-Almost nothing here runs with privilege. Exactly one script needs root, it is
-about ten lines long, and it is run once.
+Almost nothing here runs with privilege. One script needs root and is run once;
+a second, needed only to boot SunOS, adds a single address.
 
 ## What the Sun-3 does, and who answers
 
@@ -168,6 +168,7 @@ reports it as `(no carrier yet)` rather than a failure.
 | `scripts/02-fetch-payload.sh` | none | fetches NetBSD/sun3 netboot + kernel, checksummed |
 | `scripts/03-configure.sh` | none | generates `etc/`, `tftpboot/`, `nfsroot/` |
 | `root/grant-privileges.sh` | **root, once** | four `setcap`s and one symlink |
+| `root/allow-oldstyle-broadcast.sh` | **root** | one address, for a SunOS client only |
 | `scripts/start.sh` | none | starts the daemons (`m1`/`m2`/`m3`, or one by name) |
 | `scripts/stop.sh` | none | stops them |
 | `scripts/status.sh` | none | what is running, listening, registered; `-f` tails logs |
@@ -360,6 +361,45 @@ below.
 
 `selftest.sh` reads each client's kernel back over the version that client will
 actually use, `--nfs-version 2` for a SunOS client and 3 for the others.
+
+### The all-zeros broadcast
+
+SunOS's `/boot` gets its address from RARP, which carries no netmask, so when
+it broadcasts its bootparams request it uses the 4.2BSD form -- the network
+address with the host part zeroed, not `255.255.255.255`:
+
+```
+192.168.0.123.1023 > 192.168.0.0.111: UDP, length 100
+```
+
+Modern Linux installs a broadcast route for `192.168.0.255` and none for
+`192.168.0.0`, so that datagram is dropped in the input path. Nothing logs it,
+because no daemon ever sees it -- `rpcbind -d` shows the client's RARP, ND and
+TFTP traffic and then simply nothing. On the console it reads as
+
+```
+Boot: bad dialog with bootparam server (error 0x4)
+```
+
+and `0x4` is the fifth entry of the RPC error table inside `boot.sun2` itself:
+**"RPC: Unable to receive"**. It sent and heard nothing back, which is a
+different thing from a timeout and worth distinguishing.
+
+`root/allow-oldstyle-broadcast.sh` adds the address so the kernel accepts that
+destination; `rpcbind` is already on `0.0.0.0:111`. It is the second and last
+thing here that needs root, it is needed only for a SunOS client, and **it does
+not survive a reboot** -- so `selftest.sh` and `status.sh` both check for it
+whenever a `sunos` client is configured:
+
+```
+PASS  sun2_f_m: this host accepts the old-style broadcast 192.168.0.0
+```
+
+Worth knowing why this is invisible without a capture: ND and RARP reach their
+daemons through `AF_PACKET`, which bypasses the IP input path entirely, and
+TFTP is unicast to a real local address. The bootparams call is the only step
+that needs Linux to accept a *broadcast* destination, which is exactly why it
+is the only one that fails.
 
 ### How far this gets
 

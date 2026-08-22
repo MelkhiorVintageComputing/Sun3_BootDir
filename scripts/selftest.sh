@@ -61,6 +61,18 @@ while read -r n m i a p; do
 	else
 		no "$n ($i) is not on any of \"$SERVER_IF\": $(ip -4 route get "$i" 2>&1 | head -1)"
 	fi
+	# SunOS broadcasts its bootparams request to the network address, which
+	# Linux drops unless that address is configured.  Nothing else notices:
+	# the request never reaches a daemon, so no log anywhere shows it.
+	if [ "$p" = sunos ]; then
+		b=$(oldstyle_bcast_addr "$i" 2>/dev/null || echo '?')
+		if oldstyle_bcast_ok "$i"; then
+			ok "$n: this host accepts the old-style broadcast $b"
+		else
+			no "$n: $b is not accepted here, so its bootparams request will be dropped"
+			echo "        run root/allow-oldstyle-broadcast.sh as root (it does not survive a reboot)"
+		fi
+	fi
 done <<EOF
 $(clients)
 EOF
