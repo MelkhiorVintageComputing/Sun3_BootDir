@@ -18,6 +18,11 @@ if [ -z "${CLIENTS:-}" ]; then
 	CLIENTS="$CLIENT_NAME	$CLIENT_MAC	$CLIENT_IP	${CLIENT_ARCH:-sun3}"
 fi
 
+# 2049 belongs to whichever server the clients that do not ask for it expect
+# to find there; see the config.
+NFS2D_PORT=${NFS2D_PORT:-2049}
+UNFSD_PORT=${UNFSD_PORT:-2050}
+
 DIST=$BOOTDIR/dist
 PKG=$BOOTDIR/pkg
 SBIN=$BOOTDIR/sbin

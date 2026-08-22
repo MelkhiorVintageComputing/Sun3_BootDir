@@ -143,8 +143,10 @@ start_nfs2d() {
 		return 0
 	fi
 	is_running rpcbind || warn "rpcbind is not running; nfs2d will fail to register"
+	# SunOS sends NFS to 2049 without asking the portmapper, so this has to
+	# be the server sitting there.
 	spawn nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
-		--root "$NFSROOT" --port "${NFS2D_PORT:-2050}" --debug
+		--root "$NFSROOT" --port "$NFS2D_PORT" --debug
 }
 
 start_atftpd() {
@@ -192,7 +194,11 @@ start_unfsd() {
 	# -s: serve everything as the invoking user.  We are not root, so no uid
 	#     switching can happen anyway; this just makes the reported ownership
 	#     consistent.  Read-only is all the bootloader needs.
-	spawn unfsd "$SBIN/unfsd" -d -s -e "$ETC/exports" -n 2049 -m 2049
+	# Not 2049: that is where a client which does not consult the portmapper
+	# expects to find NFS, and SunOS is such a client.  NetBSD asks for both
+	# mountd and nfs by program number, so it follows us anywhere.
+	spawn unfsd "$SBIN/unfsd" -d -s -e "$ETC/exports" \
+		-n "$UNFSD_PORT" -m "$UNFSD_PORT"
 }
 
 case "${1:-all}" in

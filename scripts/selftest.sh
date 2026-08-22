@@ -100,7 +100,11 @@ fi
 echo
 echo '3. listening sockets'
 listening=$(ss -lnu 2>/dev/null)
-for port in 69 111 2049; do
+want_ports="69 111 $UNFSD_PORT"
+if [ -n "$(clients | awk '$5 == "sunos"')" ]; then
+	want_ports="$want_ports $NFS2D_PORT"
+fi
+for port in $want_ports; do
 	if printf '%s\n' "$listening" | grep -q ":$port "; then
 		ok "udp/$port bound"
 	else
@@ -212,6 +216,19 @@ else
 		else
 			no "$n: could not read $want from its root over NFSv$vers:"
 			sed 's/^/        /' "$LOG/nfs-probe-$n.out"
+		fi
+		# SunOS asks the portmapper for mountd and then sends NFS to 2049
+		# regardless, so the lookup above can pass while the real boot
+		# fails.  Repeat it the way the machine actually does it.
+		if [ "$p" = sunos ]; then
+			if python3 "$BOOTDIR/tools/nfs-probe.py" --client "$n" --file "$want" \
+					--nfs-version 2 --nfs-port 2049 \
+					>"$LOG/nfs-probe-$n-2049.out" 2>&1; then
+				ok "$n: port 2049 answers NFSv2, as SunOS assumes it does"
+			else
+				no "$n: port 2049 does not answer NFSv2 -- SunOS sends there without asking:"
+				sed 's/^/        /' "$LOG/nfs-probe-$n-2049.out"
+			fi
 		fi
 	done <<EOF
 $(clients)

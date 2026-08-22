@@ -46,6 +46,7 @@ TFTPBOOT='$TFTPBOOT'
 NAME='$(tftpname "$CLIENT_IP" "$CLIENT_ARCH")'
 CLIENT_IP='$CLIENT_IP'
 SERVER_IP='$SERVER_IP'
+UNFSD_PORT='$UNFSD_PORT'
 SUN2_MAC='$SUN2_MAC'
 SUN2_BOOT1='$SUN2_BOOT1'
 INNER_SCRIPT=1
@@ -79,7 +80,7 @@ echo
 echo 'starting daemons on a private loopback'
 start rpcbind    "$SBIN/rpcbind" -f -d -i || exit 1
 start bootparamd "$SBIN/rpc.bootparamd" -d -r "$SERVER_IP" -f "$ETC/bootparams" || exit 1
-start unfsd      "$SBIN/unfsd" -d -s -e "$ETC/exports" -n 2049 -m 2049 || exit 1
+start unfsd      "$SBIN/unfsd" -d -s -e "$ETC/exports" -n "$UNFSD_PORT" -m "$UNFSD_PORT" || exit 1
 # --user/--group are only needed here: inside the namespace our uid maps to 0,
 # so atftpd thinks it is root and insists on dropping privileges to a user that
 # does not exist in the map.  Outside, it sees a plain uid and skips all of

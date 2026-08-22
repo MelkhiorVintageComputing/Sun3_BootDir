@@ -354,6 +354,34 @@ Both Sun-3s and the Sun-2 can boot at the same time, each over the version it
 understands. `nfs2d` registers itself through the portmapper, so its port is
 not something a client has to be told.
 
+### 2049 has to be the NFSv2 server
+
+SunOS asks the portmapper for **mountd** and then sends **NFS straight to
+2049** without looking it up -- 2049 is the well-known port, and a 1989 client
+simply assumes it. With unfs3 there, the mount succeeds and the very next call
+fails:
+
+```
+NFS getattr failed for server x11spl: RPC: Program/version mismatch
+Boot: unable to mount root (error 0x10)
+```
+
+unfs3 is answering correctly; it serves version 3 and was asked for version 2.
+So `nfs2d` takes 2049 and unfs3 moves to `UNFSD_PORT`, which costs NetBSD
+nothing because it looks up both mountd and nfs by program number:
+
+```
+100003  2  udp  2049   nfs      nfs2d    SunOS -- assumes this port
+100005  1  udp  2049   mountd   nfs2d
+100003  3  udp  2050   nfs      unfs3    NetBSD -- asks the portmapper
+100005  3  udp  2050   mountd   unfs3
+```
+
+A portmapper-based probe cannot catch this, because the lookup answers
+correctly while the real boot fails. `selftest.sh` therefore checks a SunOS
+client twice: once through the portmapper, and once with `--nfs-port 2049` to
+do it the way the machine does.
+
 It is deliberately **read-only**: everything that would modify the export
 returns `NFSERR_ROFS`. That is enough to load a kernel, which is what
 netbooting is. It is not enough for SunOS to then come up multiuser -- see

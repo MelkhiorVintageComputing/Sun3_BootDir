@@ -135,15 +135,22 @@ def probe_v2(sock, args, export):
     fh = d.fixed(32)
     print(f"MNT {export} -> filehandle {len(fh)} bytes")
 
-    try:
-        nport = getport(sock, args.server, NFSPROG, NFSVERS2)
-    except Exception as exc:
-        print(f"GETPORT nfs v2: FAILED: {exc}")
-        return 1
-    if nport == 0:
-        print("GETPORT nfs v2: not registered")
-        return 1
-    print(f"GETPORT nfs v2      -> port {nport}")
+    if args.nfs_port:
+        # SunOS never looks NFS up: 2049 is the well-known port and it just
+        # sends there.  Skipping the lookup here is what makes this probe able
+        # to catch a v3 server sitting on it.
+        nport = args.nfs_port
+        print(f"NFS v2 straight to port {nport} (no portmapper lookup)")
+    else:
+        try:
+            nport = getport(sock, args.server, NFSPROG, NFSVERS2)
+        except Exception as exc:
+            print(f"GETPORT nfs v2: FAILED: {exc}")
+            return 1
+        if nport == 0:
+            print("GETPORT nfs v2: not registered")
+            return 1
+        print(f"GETPORT nfs v2      -> port {nport}")
 
     reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
                      NFSPROC2_LOOKUP, fh + xdr_string(args.file))
@@ -185,6 +192,10 @@ def main():
     ap.add_argument("--client", default=None,
                     help="which CLIENTS entry to use, by name or IP "
                          "(default: the first)")
+    ap.add_argument("--nfs-port", type=int, default=None,
+                    help="send NFS straight to this port instead of asking the "
+                         "portmapper -- what SunOS does, which is why 2049 has "
+                         "to be the NFSv2 server")
     ap.add_argument("--nfs-version", type=int, choices=(2, 3), default=3,
                     help="3 for unfs3 and NetBSD (default); 2 for tools/nfs2d.py "
                          "and SunOS, which predates NFSv3 by six years")
