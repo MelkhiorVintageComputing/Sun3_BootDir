@@ -58,6 +58,20 @@ NFNON, NFREG, NFDIR, NFBLK, NFCHR, NFLNK = 0, 1, 2, 3, 4, 5
 MAXDATA = 8192
 FHSIZE = 32
 
+# Only for the log.  A boot that stalls does so somewhere in here, and which
+# call it stopped on is the whole question, so every one of them gets a line.
+NFS2_PROCS = {
+    0: "NULL", 1: "GETATTR", 2: "SETATTR", 3: "ROOT", 4: "LOOKUP",
+    5: "READLINK", 6: "READ", 7: "WRITECACHE", 8: "WRITE", 9: "CREATE",
+    10: "REMOVE", 11: "RENAME", 12: "LINK", 13: "SYMLINK", 14: "MKDIR",
+    15: "RMDIR", 16: "READDIR", 17: "STATFS",
+}
+NFS2_ERRS = {
+    0: "OK", 1: "PERM", 2: "NOENT", 5: "IO", 6: "NXIO", 13: "ACCES",
+    17: "EXIST", 19: "NODEV", 20: "NOTDIR", 21: "ISDIR", 27: "FBIG",
+    28: "NOSPC", 30: "ROFS", 63: "NAMETOOLONG", 66: "NOTEMPTY", 70: "STALE",
+}
+
 ERRNO_TO_NFS = {
     errno.EPERM: NFSERR_PERM,
     errno.ENOENT: NFSERR_NOENT,
@@ -217,6 +231,15 @@ class Server:
         if self.debug:
             print(*a, file=sys.stderr, flush=True)
 
+    def shortname(self, path):
+        """Paths relative to the export root, so a line stays readable."""
+        root = self.export.root
+        if path == root:
+            return "/"
+        if path.startswith(root + os.sep):
+            return path[len(root) + 1:]
+        return path
+
     # ---------------------------------------------------------------- RPC
     def serve_forever(self):
         while True:
@@ -277,11 +300,11 @@ class Server:
             path = d.string().decode(errors="replace")
             real = os.path.realpath(path)
             if not self.export.contains(real) or not os.path.isdir(real):
-                self.log(f"MNT {path} from {addr[0]}: denied")
+                self.log(f"{addr[0]} MNT {path} -> denied")
                 return self.accepted(xid, SUCCESS,
                                      struct.pack("!I", NFSERR_ACCES))
             handle = self.export.remember(real)
-            self.log(f"MNT {path} from {addr[0]}: ok")
+            self.log(f"{addr[0]} MNT {path} -> ok")
             return self.accepted(xid, SUCCESS, struct.pack("!I", 0) + handle)
         if proc in (3, 4):                                # UMNT, UMNTALL
             return self.accepted(xid, SUCCESS)
@@ -296,15 +319,21 @@ class Server:
 
     # --------------------------------------------------------------- NFS v2
     def nfs(self, xid, proc, d, addr):
+        who = addr[0]
+        op = NFS2_PROCS.get(proc, f"proc{proc}")
+
         if proc == 0:                                     # NULL
+            self.log(f"{who} NULL")
             return self.accepted(xid, SUCCESS)
 
-        def err(status):
+        def err(status, detail=""):
+            self.log(f"{who} {op}{detail} -> {NFS2_ERRS.get(status, status)}")
             return self.accepted(xid, SUCCESS, struct.pack("!I", status))
 
-        # Everything that writes.  Saying ROFS plainly beats a timeout.
+        # Everything that writes.  Saying ROFS plainly beats a timeout, and
+        # seeing it in the log is how you learn the client wants a writable
+        # root rather than merely a readable one.
         if proc in (2, 8, 9, 10, 11, 12, 13, 14, 15):
-            self.log(f"proc {proc} from {addr[0]}: read-only export")
             return err(NFSERR_ROFS)
         if proc == 7:                                     # WRITECACHE, a no-op
             return self.accepted(xid, SUCCESS)
@@ -317,6 +346,7 @@ class Server:
                 st = os.lstat(path)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
+            self.log(f"{who} GETATTR {self.shortname(path)} -> OK")
             return self.accepted(xid, SUCCESS,
                                  struct.pack("!I", NFS_OK) + pack_fattr(st))
 
@@ -340,10 +370,9 @@ class Server:
             try:
                 st = os.lstat(target)
             except OSError as exc:
-                self.log(f"LOOKUP {name} in {path}: {exc.strerror}")
-                return err(errno_to_nfs(exc))
+                return err(errno_to_nfs(exc), f" {name} in {self.shortname(path)}")
             handle = self.export.remember(os.path.realpath(target))
-            self.log(f"LOOKUP {name} -> {target}")
+            self.log(f"{who} LOOKUP {name} in {self.shortname(path)} -> OK")
             return self.accepted(xid, SUCCESS,
                                  struct.pack("!I", NFS_OK) + handle + pack_fattr(st))
 
@@ -355,6 +384,7 @@ class Server:
                 target = os.readlink(path)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
+            self.log(f"{who} READLINK {self.shortname(path)} -> {target}")
             return self.accepted(xid, SUCCESS,
                                  struct.pack("!I", NFS_OK) + pack_string(target))
 
@@ -374,7 +404,7 @@ class Server:
                     chunk = fh.read(count)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
-            self.log(f"READ {os.path.basename(path)} {offset}+{count} -> {len(chunk)}")
+            self.log(f"{who} READ {os.path.basename(path)} {offset}+{count} -> {len(chunk)}")
             return self.accepted(xid, SUCCESS,
                                  struct.pack("!I", NFS_OK) + pack_fattr(st)
                                  + pack_string(chunk))
@@ -407,6 +437,8 @@ class Server:
                 budget -= len(entry)
                 index += 1
             body += struct.pack("!II", 0, 1 if index >= len(names) else 0)
+            self.log(f"{who} READDIR {self.shortname(path)} from {cookie} "
+                     f"-> {index - cookie} entries")
             return self.accepted(xid, SUCCESS, body)
 
         if proc == 17:                                    # STATFS
@@ -417,11 +449,13 @@ class Server:
                 vfs = os.statvfs(path)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
+            self.log(f"{who} STATFS {self.shortname(path)} -> OK")
             cap = lambda v: min(v, 0x7FFFFFFF)
             return self.accepted(xid, SUCCESS, struct.pack(
                 "!IIIIII", NFS_OK, MAXDATA, vfs.f_bsize,
                 cap(vfs.f_blocks), cap(vfs.f_bfree), cap(vfs.f_bavail)))
 
+        self.log(f"{who} {op}: not implemented")
         return self.accepted(xid, PROC_UNAVAIL)
 
 
