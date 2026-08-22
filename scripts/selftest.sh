@@ -221,11 +221,21 @@ else
 		# regardless, so the lookup above can pass while the real boot
 		# fails.  Repeat it the way the machine actually does it.
 		if [ "$p" = sunos ]; then
+			# With a real root filesystem the whole tree is writable by
+			# design, so there is no read-only file left inside it to
+			# check against; the meaningful check is that the tree is
+			# writable at all.
+			if [ -f "$NFSROOT/$n/etc/rc.boot" ]; then
+				set -- --expect-writable swap
+				what="root filesystem writable"
+			else
+				set -- --expect-writable swap --expect-readonly "$want"
+				what="swap writable, $want not"
+			fi
 			if python3 "$BOOTDIR/tools/nfs-probe.py" --client "$n" --file "$want" \
-					--nfs-version 2 --nfs-port 2049 \
-					--expect-writable swap --expect-readonly "$want" \
+					--nfs-version 2 --nfs-port 2049 "$@" \
 					>"$LOG/nfs-probe-$n-2049.out" 2>&1; then
-				ok "$n: 2049 answers NFSv2; swap writable, $want not"
+				ok "$n: 2049 answers NFSv2; $what"
 			else
 				no "$n: NFSv2 on 2049 is not what a SunOS boot needs:"
 				sed 's/^/        /' "$LOG/nfs-probe-$n-2049.out"

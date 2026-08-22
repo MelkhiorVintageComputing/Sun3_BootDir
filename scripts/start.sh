@@ -163,7 +163,8 @@ start_nfs2d() {
 	# SunOS sends NFS to 2049 without asking the portmapper, so this has to
 	# be the server sitting there.
 	spawn nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
-		--root "$NFSROOT" --port "$NFS2D_PORT" --debug "$@"
+		--root "$NFSROOT" --port "$NFS2D_PORT" --tsize "$NFS2D_TSIZE" \
+		--debug "$@"
 }
 
 start_atftpd() {

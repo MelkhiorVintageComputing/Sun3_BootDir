@@ -209,32 +209,38 @@ def v2_write(sock, args, fh, nport, offset, data):
 
 
 def check_writability(sock, args, dirfh, nport):
-    """Swap must be writable and the kernel beside it must not be."""
-    ok = True
+    """Is the export writable exactly where it should be?
+
+    Both halves are non-destructive, which matters more than it sounds: this
+    runs against the live server, and the client on the other end may be
+    swapping to the very file being tested or running out of the very tree.
+
+      writable  read some bytes and write the same bytes back.  A successful
+                no-op write proves the permission without changing anything.
+      readonly  write zero bytes.  The server decides whether to allow it
+                before it has anything to store, so a refusal is just as
+                informative and a success costs nothing.
+    """
     if args.expect_writable:
         name = args.expect_writable
         fh = v2_lookup(sock, args, dirfh, nport, name)
         if fh is None:
-            print(f"\n{name}: not present, so there is nothing to swap to")
-            return False
-        page = b"nfs2d-probe-" + b"\xa5" * 500
-        status = v2_write(sock, args, fh, nport, 4096, page)
-        if status != 0:
-            print(f"\nWRITE {name} -> NFSv2 error {status}; a diskless client "
-                  f"cannot swap to a read-only file")
+            print(f"\n{name}: not present, so there is nothing to write to")
             return False
         reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
-                         NFSPROC2_READ,
-                         fh + struct.pack("!III", 4096, len(page), len(page)))
+                         NFSPROC2_READ, fh + struct.pack("!III", 0, 512, 512))
         d = Decoder(reply)
         if d.u32() != 0:
-            print(f"\nREAD back of {name} failed")
+            print(f"\nREAD of {name} failed, so it cannot be write-tested")
             return False
         d.off += 68
-        if d.opaque() != page:
-            print(f"\nREAD back of {name} returned different bytes")
+        existing = d.opaque()
+        status = v2_write(sock, args, fh, nport, 0, existing)
+        if status != 0:
+            print(f"\nWRITE {name} -> NFSv2 error {status}; a diskless client "
+                  f"cannot swap to, or run from, a read-only file")
             return False
-        print(f"WRITE+READ {name:<10} -> {len(page)} bytes survived the round trip")
+        print(f"WRITE {name:<10} -> {len(existing)} bytes rewritten unchanged")
 
     if args.expect_readonly:
         name = args.expect_readonly
@@ -242,13 +248,13 @@ def check_writability(sock, args, dirfh, nport):
         if fh is None:
             print(f"\n{name}: not present")
             return False
-        status = v2_write(sock, args, fh, nport, 0, b"\xde\xad\xbe\xef")
+        status = v2_write(sock, args, fh, nport, 0, b"")
         if status != NFSERR_ROFS:
-            print(f"\nWRITE {name} -> status {status}, expected ROFS ({NFSERR_ROFS}); "
-                  f"the export is more writable than intended")
+            print(f"\nWRITE {name} -> status {status}, expected ROFS "
+                  f"({NFSERR_ROFS}); the export is more writable than intended")
             return False
-        print(f"WRITE      {name:<10} -> refused with ROFS, as it should be")
-    return ok
+        print(f"WRITE {name:<10} -> refused with ROFS, as it should be")
+    return True
 
 
 def main():

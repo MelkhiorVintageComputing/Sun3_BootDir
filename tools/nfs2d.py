@@ -55,7 +55,27 @@ NFSERR_NAMETOOLONG, NFSERR_NOTEMPTY, NFSERR_STALE = 63, 66, 70
 # NFSv2 file types
 NFNON, NFREG, NFDIR, NFBLK, NFCHR, NFLNK = 0, 1, 2, 3, 4, 5
 
+# The most we will ever put in one reply.  A client may ask for this much and
+# must get all of it: a short READ is how NFSv2 says "end of file", so trimming
+# a reply would silently truncate the file.
 MAXDATA = 8192
+
+# What we tell the client to ask for, in the tsize field of STATFS -- "the
+# number of bytes the server would like to have in the data part of READ and
+# WRITE requests" (RFC 1094).  Clients take it seriously.
+#
+# 1024 rather than 8192 because of the receiving end.  An 8192-byte reply is
+# about 8.3KB of UDP, which IP splits into six fragments, five of them
+# full-size frames, and a Sun-2's ie interface drops those with
+#
+#     ie0: giant packet
+#
+# leaving the client to retry forever and report the server as not responding.
+# At 1024 the whole reply -- data, attributes, RPC and UDP and IP headers --
+# is about 1160 bytes and travels as a single frame.  2048 would not do: it
+# still needs two fragments, and the first of them is full size.
+DEFAULT_TSIZE = 1024
+
 FHSIZE = 32
 
 # Only for the log.  A boot that stalls does so somewhere in here, and which
@@ -226,7 +246,7 @@ def errno_to_nfs(exc):
 
 class Server:
     def __init__(self, export, port, allow, debug, writable=(),
-                 writable_trees=(), squash=False):
+                 writable_trees=(), squash=False, tsize=DEFAULT_TSIZE):
         self.export = export
         self.port = port
         self.allow = allow
@@ -240,6 +260,7 @@ class Server:
         # exactly as narrow as it was.
         self.writable_trees = [os.path.realpath(t) for t in writable_trees]
         self.squash = squash
+        self.tsize = tsize
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("0.0.0.0", port))
@@ -629,7 +650,7 @@ class Server:
             self.log(f"{who} STATFS {self.shortname(path)} -> OK")
             cap = lambda v: min(v, 0x7FFFFFFF)
             return self.accepted(xid, SUCCESS, struct.pack(
-                "!IIIIII", NFS_OK, MAXDATA, vfs.f_bsize,
+                "!IIIIII", NFS_OK, self.tsize, vfs.f_bsize,
                 cap(vfs.f_blocks), cap(vfs.f_bfree), cap(vfs.f_bavail)))
 
         self.log(f"{who} {op}: not implemented")
@@ -680,6 +701,11 @@ def main():
                     help="allow writes anywhere under DIR (repeatable).  A "
                          "client with a real root filesystem needs this; a "
                          "client that only swaps does not.")
+    ap.add_argument("--tsize", type=int, default=DEFAULT_TSIZE,
+                    help=f"transfer size advertised in STATFS "
+                         f"(default {DEFAULT_TSIZE}).  Raising it above about "
+                         f"1400 makes replies fragment, which a Sun-2 reports "
+                         f"as 'ie0: giant packet' and drops.")
     ap.add_argument("--squash-to-root", action="store_true",
                     help="report every file as owned by root.  A SunOS root is "
                          "root-owned throughout, but this server must own the "
@@ -696,7 +722,7 @@ def main():
 
     export = Export(root, debug=args.debug)
     server = Server(export, args.port, allow, args.debug, args.writable,
-                    args.writable_tree, args.squash_to_root)
+                    args.writable_tree, args.squash_to_root, args.tsize)
     for w in sorted(server.writable):
         print(f"writable file: {w}", file=sys.stderr)
     for t in server.writable_trees:
@@ -712,8 +738,8 @@ def main():
                 raise SystemExit(f"the portmapper would not register {what}")
             print(f"registered {what} on udp/{args.port}", file=sys.stderr)
 
-    print(f"serving {root} read-only over NFSv2 on udp/{args.port}",
-          file=sys.stderr, flush=True)
+    print(f"serving {root} over NFSv2 on udp/{args.port}, "
+          f"advertising tsize {args.tsize}", file=sys.stderr, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -22,6 +22,7 @@ fi
 # to find there; see the config.
 NFS2D_PORT=${NFS2D_PORT:-2049}
 UNFSD_PORT=${UNFSD_PORT:-2050}
+NFS2D_TSIZE=${NFS2D_TSIZE:-1024}
 
 DIST=$BOOTDIR/dist
 PKG=$BOOTDIR/pkg
