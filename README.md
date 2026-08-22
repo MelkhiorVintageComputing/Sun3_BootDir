@@ -502,14 +502,13 @@ Root is therefore needed **once, to unpack**, and never at runtime.
 only swaps stays exactly as narrow as it was; `CREATE`, `REMOVE`, `MKDIR` and
 the rest are still refused outside a writable tree.
 
-### "ie0: giant packet"
+### "ie0: giant packet" — a client fault, not a server one
 
-A Sun-2's `ie` interface drops frames it considers oversized and says so. What
-provokes them is an NFS reply big enough to fragment: 8192 bytes of data is
-about 8.3KB of UDP, which IP splits into six fragments, five of them full-size.
-The client drops those, never assembles the reply, and reports
+Recorded here because the evidence is on this side, and because it is easy to
+mistake for a server problem. The console says
 
 ```
+ie0: giant packet
 NFS server x11spl not responding still trying
 ```
 
@@ -520,20 +519,35 @@ offset:
 192.168.0.123 READ init 0+8192 -> 8192       (× 18, all at offset 0)
 ```
 
-The server chose that size. `STATFS` carries a `tsize` field — "the number of
-bytes the server would like to have in the data part of READ and WRITE
-requests" (RFC 1094) — and clients take it seriously. `NFS2D_TSIZE` sets it,
-and the default is **1024**, which keeps a whole reply (data, attributes, RPC,
-UDP and IP headers, about 1160 bytes) inside a single frame. 2048 would not do:
-it still needs two fragments and the first is full size.
+The sizes locate the fault precisely:
 
-`MAXDATA` stays at 8192, because that is a different thing — the most the
-server will ever return. A client that asks for 8192 anyway must still get all
-of it: a short READ is how NFSv2 signals end of file, so trimming a reply would
-silently truncate the file rather than slow it down.
+| what | on the wire | result |
+|---|---|---|
+| a 1024-byte NFS reply | one 1166-byte frame | works — 748 of them in a row |
+| an 8192-byte NFS reply | 8320 bytes of UDP → six fragments, five full-size | every one dropped |
 
-The client reads `tsize` when it mounts, so a Sun-2 already up will keep using
-whatever it was told at boot; it needs a reboot to pick up a new value.
+The interface cannot receive a 1514-byte frame. Nothing in the protocol is
+wrong and nothing here is misconfigured: full-size frames are ordinary
+Ethernet, and every other client on the same wire takes them.
+
+**This directory does not work around it.** A per-host route MTU would hide it
+convincingly, which is exactly the argument against: the machine would then
+appear to work while still dropping any full-size frame from anything else on
+the network. It belongs in whatever fixes the hardware.
+
+Two things that are *not* the lever, so nobody spends the afternoon on them:
+
+* **The client cannot be asked for less.** `STATFS` carries `tsize` — "the
+  number of bytes the server would like to have in the data part of READ and
+  WRITE requests" (RFC 1094) — and `NFS2D_TSIZE` sets it. A SunOS kernel
+  mounting its root ignores it and has no mount options to pass at boot; it
+  asked for 8192 again after a reboot. (`boot.sun2`'s 1024-byte reads are its
+  own choice, not ours, which is why the kernel loads and then userland does
+  not.) The knob is kept because it is a legitimate NFSv2 setting and a client
+  that honours it benefits, not because it helps here.
+* **The server cannot send less.** A short NFSv2 READ is how end of file is
+  signalled, so trimming a reply would silently truncate the file rather than
+  slow it down. `MAXDATA` stays at 8192 for that reason.
 
 ### How far this gets
 

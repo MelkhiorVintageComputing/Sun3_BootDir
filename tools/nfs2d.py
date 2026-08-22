@@ -64,16 +64,14 @@ MAXDATA = 8192
 # number of bytes the server would like to have in the data part of READ and
 # WRITE requests" (RFC 1094).  Clients take it seriously.
 #
-# 1024 rather than 8192 because of the receiving end.  An 8192-byte reply is
-# about 8.3KB of UDP, which IP splits into six fragments, five of them
-# full-size frames, and a Sun-2's ie interface drops those with
+# 1024 keeps a whole reply -- data, attributes, RPC and UDP and IP headers --
+# at about 1160 bytes, inside a single Ethernet frame, which is a reasonable
+# thing to ask of a 1989 client on a 10Mbit wire.
 #
-#     ie0: giant packet
-#
-# leaving the client to retry forever and report the server as not responding.
-# At 1024 the whole reply -- data, attributes, RPC and UDP and IP headers --
-# is about 1160 bytes and travels as a single frame.  2048 would not do: it
-# still needs two fragments, and the first of them is full size.
+# It is advisory, and a SunOS kernel mounting its root ignores it: it asks for
+# 8192 whatever we say here.  Do not reach for this to work around a client
+# that cannot receive the resulting fragments -- see README, "ie0: giant
+# packet".
 DEFAULT_TSIZE = 1024
 
 FHSIZE = 32
@@ -703,9 +701,8 @@ def main():
                          "client that only swaps does not.")
     ap.add_argument("--tsize", type=int, default=DEFAULT_TSIZE,
                     help=f"transfer size advertised in STATFS "
-                         f"(default {DEFAULT_TSIZE}).  Raising it above about "
-                         f"1400 makes replies fragment, which a Sun-2 reports "
-                         f"as 'ie0: giant packet' and drops.")
+                         f"(default {DEFAULT_TSIZE}).  Advisory: a SunOS "
+                         f"kernel mounting its root ignores it.")
     ap.add_argument("--squash-to-root", action="store_true",
                     help="report every file as owned by root.  A SunOS root is "
                          "root-owned throughout, but this server must own the "
