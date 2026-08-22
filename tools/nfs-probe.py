@@ -178,9 +178,77 @@ def probe_v2(sock, args, export):
     if not data:
         print("\n  read returned nothing")
         return 1
+    if args.expect_writable or args.expect_readonly:
+        if not check_writability(sock, args, fh, nport):
+            return 1
+
     print(f"\nOK: a SunOS boot program could mount {export} and read "
           f"{args.file} over NFSv2")
     return 0
+
+
+NFSPROC2_WRITE = 8
+NFSERR_ROFS = 30
+
+
+def v2_lookup(sock, args, dirfh, nport, name):
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_LOOKUP, dirfh + xdr_string(name))
+    d = Decoder(reply)
+    if d.u32() != 0:
+        return None
+    return d.fixed(32)
+
+
+def v2_write(sock, args, fh, nport, offset, data):
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_WRITE,
+                     fh + struct.pack("!III", 0, offset, len(data))
+                     + xdr_string(data))
+    return Decoder(reply).u32()
+
+
+def check_writability(sock, args, dirfh, nport):
+    """Swap must be writable and the kernel beside it must not be."""
+    ok = True
+    if args.expect_writable:
+        name = args.expect_writable
+        fh = v2_lookup(sock, args, dirfh, nport, name)
+        if fh is None:
+            print(f"\n{name}: not present, so there is nothing to swap to")
+            return False
+        page = b"nfs2d-probe-" + b"\xa5" * 500
+        status = v2_write(sock, args, fh, nport, 4096, page)
+        if status != 0:
+            print(f"\nWRITE {name} -> NFSv2 error {status}; a diskless client "
+                  f"cannot swap to a read-only file")
+            return False
+        reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                         NFSPROC2_READ,
+                         fh + struct.pack("!III", 4096, len(page), len(page)))
+        d = Decoder(reply)
+        if d.u32() != 0:
+            print(f"\nREAD back of {name} failed")
+            return False
+        d.off += 68
+        if d.opaque() != page:
+            print(f"\nREAD back of {name} returned different bytes")
+            return False
+        print(f"WRITE+READ {name:<10} -> {len(page)} bytes survived the round trip")
+
+    if args.expect_readonly:
+        name = args.expect_readonly
+        fh = v2_lookup(sock, args, dirfh, nport, name)
+        if fh is None:
+            print(f"\n{name}: not present")
+            return False
+        status = v2_write(sock, args, fh, nport, 0, b"\xde\xad\xbe\xef")
+        if status != NFSERR_ROFS:
+            print(f"\nWRITE {name} -> status {status}, expected ROFS ({NFSERR_ROFS}); "
+                  f"the export is more writable than intended")
+            return False
+        print(f"WRITE      {name:<10} -> refused with ROFS, as it should be")
+    return ok
 
 
 def main():
@@ -192,6 +260,12 @@ def main():
     ap.add_argument("--client", default=None,
                     help="which CLIENTS entry to use, by name or IP "
                          "(default: the first)")
+    ap.add_argument("--expect-writable", metavar="NAME", default=None,
+                    help="NFSv2 only: write a page to NAME and read it back, "
+                         "which is what a diskless SunOS client does to its swap")
+    ap.add_argument("--expect-readonly", metavar="NAME", default=None,
+                    help="NFSv2 only: check a write to NAME is refused with "
+                         "ROFS, so a kernel beside the swap file stays safe")
     ap.add_argument("--nfs-port", type=int, default=None,
                     help="send NFS straight to this port instead of asking the "
                          "portmapper -- what SunOS does, which is why 2049 has "

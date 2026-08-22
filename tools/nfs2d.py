@@ -12,10 +12,10 @@ alongside unfs3 rather than in place of it: different version numbers register
 independently with the portmapper, so a NetBSD client keeps using unfs3 over
 NFSv3 and a SunOS client comes here.  Both can boot at the same time.
 
-It is deliberately read-only.  Everything that would modify the export returns
-NFSERR_ROFS.  That is enough to load a kernel, which is what netbooting needs;
-it is *not* enough for SunOS to then come up multiuser, which needs a writable
-root filesystem this does not have.
+It is read-only apart from the files named by --writable, which exist because
+a diskless SunOS client swaps over NFS and so must be able to write its swap
+file.  Everything else -- the kernels sitting in the same export -- still
+returns NFSERR_ROFS, as does anything that would create or remove a name.
 
 Runs as an ordinary user.  Nothing here needs a privileged port: the client
 finds us through the portmapper.
@@ -218,11 +218,15 @@ def errno_to_nfs(exc):
 
 
 class Server:
-    def __init__(self, export, port, allow, debug):
+    def __init__(self, export, port, allow, debug, writable=()):
         self.export = export
         self.port = port
         self.allow = allow
         self.debug = debug
+        # Writes are allowed to these exact files and nothing else.  A diskless
+        # SunOS client swaps over NFS, so its swap file has to be writable --
+        # but the kernels beside it in the same export must not be.
+        self.writable = {os.path.realpath(w) for w in writable}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("0.0.0.0", port))
@@ -230,6 +234,9 @@ class Server:
     def log(self, *a):
         if self.debug:
             print(*a, file=sys.stderr, flush=True)
+
+    def is_writable(self, path):
+        return os.path.realpath(path) in self.writable
 
     def shortname(self, path):
         """Paths relative to the export root, so a line stays readable."""
@@ -299,7 +306,9 @@ class Server:
         if proc == 1:                                     # MNT
             path = d.string().decode(errors="replace")
             real = os.path.realpath(path)
-            if not self.export.contains(real) or not os.path.isdir(real):
+            # A directory for a root, but a client may also mount a file
+            # path directly -- a swap file named by bootparams, for instance.
+            if not self.export.contains(real) or not os.path.exists(real):
                 self.log(f"{addr[0]} MNT {path} -> denied")
                 return self.accepted(xid, SUCCESS,
                                      struct.pack("!I", NFSERR_ACCES))
@@ -330,11 +339,60 @@ class Server:
             self.log(f"{who} {op}{detail} -> {NFS2_ERRS.get(status, status)}")
             return self.accepted(xid, SUCCESS, struct.pack("!I", status))
 
-        # Everything that writes.  Saying ROFS plainly beats a timeout, and
-        # seeing it in the log is how you learn the client wants a writable
-        # root rather than merely a readable one.
-        if proc in (2, 8, 9, 10, 11, 12, 13, 14, 15):
+        # Everything that changes the shape of the export.  Saying ROFS plainly
+        # beats a timeout, and seeing it in the log is how you learn the client
+        # wants a writable root rather than merely a readable one.
+        if proc in (9, 10, 11, 12, 13, 14, 15):
             return err(NFSERR_ROFS)
+
+        if proc == 2:                                     # SETATTR
+            path = self.export.resolve(d.fixed(FHSIZE))
+            if path is None:
+                return err(NFSERR_STALE)
+            if not self.is_writable(path):
+                return err(NFSERR_ROFS, f" {self.shortname(path)}")
+            # sattr: mode, uid, gid, size, atime{sec,usec}, mtime{sec,usec}.
+            # 0xFFFFFFFF means "leave alone", which is how a client asks to
+            # change one field without knowing the others.
+            mode, uid, gid, size = d.u32(), d.u32(), d.u32(), d.u32()
+            try:
+                if size != 0xFFFFFFFF:
+                    with open(path, "r+b") as fh:
+                        fh.truncate(size)
+                    self.log(f"{who} SETATTR {self.shortname(path)} size={size} -> OK")
+                else:
+                    # mode, uid and gid we cannot honour as an ordinary user,
+                    # and a swap file does not care.  Report success with the
+                    # attributes unchanged rather than failing the boot.
+                    self.log(f"{who} SETATTR {self.shortname(path)} "
+                             f"(mode/uid/gid ignored) -> OK")
+                st = os.lstat(path)
+            except OSError as exc:
+                return err(errno_to_nfs(exc))
+            return self.accepted(xid, SUCCESS,
+                                 struct.pack("!I", NFS_OK) + pack_fattr(st))
+
+        if proc == 8:                                     # WRITE
+            path = self.export.resolve(d.fixed(FHSIZE))
+            d.u32()                                       # beginoffset, unused
+            offset = d.u32()
+            d.u32()                                       # totalcount, unused
+            data = d.string()
+            if path is None:
+                return err(NFSERR_STALE)
+            if not self.is_writable(path):
+                return err(NFSERR_ROFS, f" {self.shortname(path)}")
+            try:
+                with open(path, "r+b") as fh:
+                    fh.seek(offset)
+                    fh.write(data)
+                st = os.lstat(path)
+            except OSError as exc:
+                return err(errno_to_nfs(exc))
+            self.log(f"{who} WRITE {os.path.basename(path)} "
+                     f"{offset}+{len(data)} -> OK")
+            return self.accepted(xid, SUCCESS,
+                                 struct.pack("!I", NFS_OK) + pack_fattr(st))
         if proc == 7:                                     # WRITECACHE, a no-op
             return self.accepted(xid, SUCCESS)
 
@@ -493,6 +551,11 @@ def main():
                     help="UDP port (default 2050; 2049 belongs to unfs3)")
     ap.add_argument("--allow", default="",
                     help="comma-separated client addresses (default: any)")
+    ap.add_argument("--writable", action="append", default=[],
+                    metavar="FILE",
+                    help="allow writes to this exact file (repeatable).  "
+                         "Everything else stays read-only; a diskless SunOS "
+                         "client needs it for its swap file.")
     ap.add_argument("--no-register", action="store_true",
                     help="do not register with the portmapper")
     ap.add_argument("--debug", action="store_true")
@@ -504,7 +567,9 @@ def main():
     allow = {a for a in args.allow.split(",") if a}
 
     export = Export(root, debug=args.debug)
-    server = Server(export, args.port, allow, args.debug)
+    server = Server(export, args.port, allow, args.debug, args.writable)
+    for w in server.writable:
+        print(f"writable: {w}", file=sys.stderr)
 
     if not args.no_register:
         for prog, vers, what in ((NFSPROG, NFSVERS, "nfs v2"),

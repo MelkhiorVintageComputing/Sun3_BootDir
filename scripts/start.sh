@@ -143,10 +143,16 @@ start_nfs2d() {
 		return 0
 	fi
 	is_running rpcbind || warn "rpcbind is not running; nfs2d will fail to register"
+	# Each sunos client swaps over NFS, so its swap file -- and nothing else
+	# in the export -- has to be writable.
+	set --
+	for n in $(clients | awk '$5 == "sunos" { print $1 }'); do
+		set -- "$@" --writable "$NFSROOT/$n/swap"
+	done
 	# SunOS sends NFS to 2049 without asking the portmapper, so this has to
 	# be the server sitting there.
 	spawn nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
-		--root "$NFSROOT" --port "$NFS2D_PORT" --debug
+		--root "$NFSROOT" --port "$NFS2D_PORT" --debug "$@"
 }
 
 start_atftpd() {

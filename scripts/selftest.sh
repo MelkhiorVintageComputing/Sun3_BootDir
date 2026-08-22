@@ -223,10 +223,11 @@ else
 		if [ "$p" = sunos ]; then
 			if python3 "$BOOTDIR/tools/nfs-probe.py" --client "$n" --file "$want" \
 					--nfs-version 2 --nfs-port 2049 \
+					--expect-writable swap --expect-readonly "$want" \
 					>"$LOG/nfs-probe-$n-2049.out" 2>&1; then
-				ok "$n: port 2049 answers NFSv2, as SunOS assumes it does"
+				ok "$n: 2049 answers NFSv2; swap writable, $want not"
 			else
-				no "$n: port 2049 does not answer NFSv2 -- SunOS sends there without asking:"
+				no "$n: NFSv2 on 2049 is not what a SunOS boot needs:"
 				sed 's/^/        /' "$LOG/nfs-probe-$n-2049.out"
 			fi
 		fi

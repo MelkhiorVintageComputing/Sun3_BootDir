@@ -382,10 +382,41 @@ correctly while the real boot fails. `selftest.sh` therefore checks a SunOS
 client twice: once through the portmapper, and once with `--nfs-port 2049` to
 do it the way the machine does.
 
-It is deliberately **read-only**: everything that would modify the export
-returns `NFSERR_ROFS`. That is enough to load a kernel, which is what
-netbooting is. It is not enough for SunOS to then come up multiuser -- see
-below.
+### Swap, and why the export is not entirely read-only
+
+A diskless SunOS kernel asks bootparams for **`swap`** immediately after
+mounting root, and retries forever if nobody answers. With only `root` in the
+entry it mounts, sizes the filesystem, and stops there:
+
+```
+nfs2d       MNT /…/nfsroot/sun2_f_m -> ok
+nfs2d       GETATTR sun2_f_m -> OK
+nfs2d       STATFS  sun2_f_m -> OK
+bootparamd  getfile got question for "sun2_f_m" and file "swap"
+bootparamd  getfile failed for sun2_f_m           (× 39, and counting)
+```
+
+Neither `GETATTR` nor `STATFS` says anything about a file *inside* the root, so
+no amount of reading them reveals a missing `init` — a client stuck here never
+reaches a `LOOKUP` at all. The absence of failures was not evidence that
+nothing was wrong.
+
+`03-configure.sh` gives every `sunos` client a `swap=` entry and a sparse
+`nfsroot/<name>/swap` of `SUNOS_SWAP_MB`, created only when absent so that
+re-running it cannot wipe the swap of a machine that is up.
+
+Swapping means writing, so `nfs2d` is no longer entirely read-only — but the
+exception is one named file. `start.sh` passes `--writable` for each client's
+swap and nothing else, so the kernels in the same export still refuse:
+
+```
+192.168.0.123 WRITE swap 4096+512   -> OK
+192.168.0.123 WRITE sun2_f_m/vmunix -> ROFS
+```
+
+`CREATE`, `REMOVE`, `MKDIR` and the rest are refused unconditionally: nothing
+can add or remove a name. `selftest.sh` checks both halves — that swap survives
+a write and read-back, and that the kernel beside it is refused.
 
 `selftest.sh` reads each client's kernel back over the version that client will
 actually use, `--nfs-version 2` for a SunOS client and 3 for the others.
