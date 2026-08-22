@@ -169,6 +169,7 @@ reports it as `(no carrier yet)` rather than a failure.
 | `scripts/03-configure.sh` | none | generates `etc/`, `tftpboot/`, `nfsroot/` |
 | `root/grant-privileges.sh` | **root, once** | four `setcap`s and one symlink |
 | `root/allow-oldstyle-broadcast.sh` | **root** | one address, for a SunOS client only |
+| `root/make-sunos-root.sh` | **root, once** | unpacks a SunOS root (needs `mknod`) |
 | `scripts/start.sh` | none | starts the daemons (`m1`/`m2`/`m3`, or one by name) |
 | `scripts/stop.sh` | none | stops them |
 | `scripts/status.sh` | none | what is running, listening, registered; `-f` tails logs |
@@ -459,6 +460,47 @@ daemons through `AF_PACKET`, which bypasses the IP input path entirely, and
 TFTP is unicast to a real local address. The bootparams call is the only step
 that needs Linux to accept a *broadcast* destination, which is exactly why it
 is the only one that fails.
+
+### A real SunOS root
+
+`root-4.0.3.tar.gz` in the SunOS netboot directory is a complete 4.0.3 root --
+2780 members, 113 device nodes, 147 symlinks, 50 setuid binaries, `/usr`
+included so the client mounts nothing else. `root/make-sunos-root.sh` unpacks
+it for a client:
+
+```sh
+sudo root/make-sunos-root.sh            # or: ... sun2_f_m
+```
+
+It reads the client's name and address out of `config/sun3boot.conf` rather
+than taking them again, so they cannot drift from what the daemons serve, and
+hands off to that directory's own `mkroot`, which patches `etc/rc.boot`,
+`etc/hosts` and `etc/fstab` to match.
+
+Root is needed for one thing: `mknod`. Unpacked as an ordinary user the tree
+comes out with an empty `/dev` and the client cannot open its console, which is
+why `mkroot` refuses to run as anyone else.
+
+### Root-owned tree, unprivileged server
+
+That leaves a problem worth naming, because it is the one this whole directory
+has been deferring since the beginning. A SunOS root is owned by root
+throughout. `nfs2d` runs as an ordinary user, so it could read some of that
+tree and write none of it — and the obvious fix, running the NFS server as
+root, is exactly what everything here has been built to avoid.
+
+So the script does a second thing: it gives the tree to the user who runs the
+daemons, and `start.sh` passes `--squash-to-root`, which reports every file to
+the client as owned by root. The client sees the ownership SunOS expects; the
+server can do the I/O. `chown` clears setuid and setgid bits, so the 50 files
+that carry them are recorded first and restored afterwards.
+
+Root is therefore needed **once, to unpack**, and never at runtime.
+
+`start.sh` notices a real root by looking for `etc/rc.boot` and switches from
+`--writable <swap file>` to `--writable-tree <the whole root>`. A client that
+only swaps stays exactly as narrow as it was; `CREATE`, `REMOVE`, `MKDIR` and
+the rest are still refused outside a writable tree.
 
 ### How far this gets
 

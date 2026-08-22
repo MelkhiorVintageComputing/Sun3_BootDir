@@ -189,8 +189,15 @@ def nfs_type(mode):
     return NFNON
 
 
-def pack_fattr(st):
-    """struct fattr -- seventeen 32-bit words, RFC 1094 section 2.3.5."""
+def pack_fattr(st, squash=False):
+    """struct fattr -- seventeen 32-bit words, RFC 1094 section 2.3.5.
+
+    squash reports everything as owned by root.  A SunOS root filesystem is
+    root-owned throughout, but this server runs as an ordinary user and so must
+    own the files on disk to be able to write them.  Reporting the on-disk
+    owner would show the client a tree owned by a uid it has never heard of,
+    with every setuid binary setuid to that uid instead of to root.
+    """
     # NFSv2 has 32-bit sizes throughout.  A kernel is well under 4GB, but say
     # so rather than wrapping silently.
     size = min(st.st_size, 0xFFFFFFFF)
@@ -199,8 +206,8 @@ def pack_fattr(st):
         nfs_type(st.st_mode),
         st.st_mode & 0xFFFF,
         st.st_nlink,
-        st.st_uid & 0xFFFFFFFF,
-        st.st_gid & 0xFFFFFFFF,
+        0 if squash else st.st_uid & 0xFFFFFFFF,
+        0 if squash else st.st_gid & 0xFFFFFFFF,
         size,
         512,                                  # blocksize
         st.st_rdev & 0xFFFFFFFF,
@@ -218,7 +225,8 @@ def errno_to_nfs(exc):
 
 
 class Server:
-    def __init__(self, export, port, allow, debug, writable=()):
+    def __init__(self, export, port, allow, debug, writable=(),
+                 writable_trees=(), squash=False):
         self.export = export
         self.port = port
         self.allow = allow
@@ -227,6 +235,11 @@ class Server:
         # SunOS client swaps over NFS, so its swap file has to be writable --
         # but the kernels beside it in the same export must not be.
         self.writable = {os.path.realpath(w) for w in writable}
+        # Whole subtrees a client may write: its root filesystem.  Kept
+        # separate from the single-file list so that a swap-only setup stays
+        # exactly as narrow as it was.
+        self.writable_trees = [os.path.realpath(t) for t in writable_trees]
+        self.squash = squash
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("0.0.0.0", port))
@@ -236,7 +249,16 @@ class Server:
             print(*a, file=sys.stderr, flush=True)
 
     def is_writable(self, path):
-        return os.path.realpath(path) in self.writable
+        real = os.path.realpath(path)
+        if real in self.writable:
+            return True
+        for tree in self.writable_trees:
+            if real == tree or real.startswith(tree + os.sep):
+                return True
+        return False
+
+    def attrs(self, st):
+        return pack_fattr(st, self.squash)
 
     def shortname(self, path):
         """Paths relative to the export root, so a line stays readable."""
@@ -339,11 +361,104 @@ class Server:
             self.log(f"{who} {op}{detail} -> {NFS2_ERRS.get(status, status)}")
             return self.accepted(xid, SUCCESS, struct.pack("!I", status))
 
-        # Everything that changes the shape of the export.  Saying ROFS plainly
-        # beats a timeout, and seeing it in the log is how you learn the client
-        # wants a writable root rather than merely a readable one.
-        if proc in (9, 10, 11, 12, 13, 14, 15):
-            return err(NFSERR_ROFS)
+        # Names may only be created and destroyed inside a writable tree.  A
+        # swap-only export has none, so every one of these still answers ROFS
+        # there -- the narrow case did not get wider.
+        def dirop(dec):
+            """diropargs: a directory handle and a name in it."""
+            parent = self.export.resolve(dec.fixed(FHSIZE))
+            name = dec.string().decode(errors="replace")
+            if parent is None:
+                return None, None, NFSERR_STALE
+            if name in ("", ".", "..") or "/" in name:
+                return None, None, NFSERR_ACCES
+            target = os.path.join(parent, name)
+            if not self.export.contains(target):
+                return None, None, NFSERR_ACCES
+            if not self.is_writable(target):
+                return None, None, NFSERR_ROFS
+            return parent, target, None
+
+        def status_only(st):
+            return self.accepted(xid, SUCCESS, struct.pack("!I", st))
+
+        if proc in (9, 14):                               # CREATE, MKDIR
+            parent, target, bad = dirop(d)
+            if bad:
+                return err(bad)
+            mode = d.u32()                                # sattr.mode
+            d.u32(); d.u32()                              # uid, gid: not ours
+            size = d.u32()
+            perm = 0o644 if mode == 0xFFFFFFFF else mode & 0o7777
+            try:
+                if proc == 14:
+                    os.mkdir(target, perm if perm else 0o755)
+                else:
+                    fd = os.open(target, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, perm)
+                    if size not in (0, 0xFFFFFFFF):
+                        os.ftruncate(fd, size)
+                    os.close(fd)
+                st = os.lstat(target)
+            except OSError as exc:
+                return err(errno_to_nfs(exc), f" {self.shortname(target)}")
+            handle = self.export.remember(os.path.realpath(target))
+            self.log(f"{who} {op} {self.shortname(target)} -> OK")
+            return self.accepted(xid, SUCCESS,
+                                 struct.pack("!I", NFS_OK) + handle + self.attrs(st))
+
+        if proc in (10, 15):                              # REMOVE, RMDIR
+            parent, target, bad = dirop(d)
+            if bad:
+                return err(bad)
+            try:
+                os.rmdir(target) if proc == 15 else os.remove(target)
+            except OSError as exc:
+                return err(errno_to_nfs(exc), f" {self.shortname(target)}")
+            self.export.by_handle.pop(Export.handle_for(os.path.realpath(target)), None)
+            self.log(f"{who} {op} {self.shortname(target)} -> OK")
+            return status_only(NFS_OK)
+
+        if proc == 11:                                    # RENAME
+            _, src, bad = dirop(d)
+            if bad:
+                return err(bad)
+            _, dst, bad = dirop(d)
+            if bad:
+                return err(bad)
+            try:
+                os.rename(src, dst)
+            except OSError as exc:
+                return err(errno_to_nfs(exc))
+            self.export.remember(os.path.realpath(dst))
+            self.log(f"{who} RENAME {self.shortname(src)} -> {self.shortname(dst)}")
+            return status_only(NFS_OK)
+
+        if proc == 12:                                    # LINK
+            existing = self.export.resolve(d.fixed(FHSIZE))
+            _, target, bad = dirop(d)
+            if existing is None:
+                return err(NFSERR_STALE)
+            if bad:
+                return err(bad)
+            try:
+                os.link(existing, target)
+            except OSError as exc:
+                return err(errno_to_nfs(exc))
+            self.log(f"{who} LINK {self.shortname(target)} -> {self.shortname(existing)}")
+            return status_only(NFS_OK)
+
+        if proc == 13:                                    # SYMLINK
+            _, target, bad = dirop(d)
+            if bad:
+                return err(bad)
+            to = d.string().decode(errors="replace")
+            try:
+                os.symlink(to, target)
+            except OSError as exc:
+                return err(errno_to_nfs(exc), f" {self.shortname(target)}")
+            self.export.remember(target)
+            self.log(f"{who} SYMLINK {self.shortname(target)} -> {to}")
+            return status_only(NFS_OK)
 
         if proc == 2:                                     # SETATTR
             path = self.export.resolve(d.fixed(FHSIZE))
@@ -370,7 +485,7 @@ class Server:
             except OSError as exc:
                 return err(errno_to_nfs(exc))
             return self.accepted(xid, SUCCESS,
-                                 struct.pack("!I", NFS_OK) + pack_fattr(st))
+                                 struct.pack("!I", NFS_OK) + self.attrs(st))
 
         if proc == 8:                                     # WRITE
             path = self.export.resolve(d.fixed(FHSIZE))
@@ -392,7 +507,7 @@ class Server:
             self.log(f"{who} WRITE {os.path.basename(path)} "
                      f"{offset}+{len(data)} -> OK")
             return self.accepted(xid, SUCCESS,
-                                 struct.pack("!I", NFS_OK) + pack_fattr(st))
+                                 struct.pack("!I", NFS_OK) + self.attrs(st))
         if proc == 7:                                     # WRITECACHE, a no-op
             return self.accepted(xid, SUCCESS)
 
@@ -406,7 +521,7 @@ class Server:
                 return err(errno_to_nfs(exc))
             self.log(f"{who} GETATTR {self.shortname(path)} -> OK")
             return self.accepted(xid, SUCCESS,
-                                 struct.pack("!I", NFS_OK) + pack_fattr(st))
+                                 struct.pack("!I", NFS_OK) + self.attrs(st))
 
         if proc == 4:                                     # LOOKUP
             path = self.export.resolve(d.fixed(FHSIZE))
@@ -432,7 +547,7 @@ class Server:
             handle = self.export.remember(os.path.realpath(target))
             self.log(f"{who} LOOKUP {name} in {self.shortname(path)} -> OK")
             return self.accepted(xid, SUCCESS,
-                                 struct.pack("!I", NFS_OK) + handle + pack_fattr(st))
+                                 struct.pack("!I", NFS_OK) + handle + self.attrs(st))
 
         if proc == 5:                                     # READLINK
             path = self.export.resolve(d.fixed(FHSIZE))
@@ -464,7 +579,7 @@ class Server:
                 return err(errno_to_nfs(exc))
             self.log(f"{who} READ {os.path.basename(path)} {offset}+{count} -> {len(chunk)}")
             return self.accepted(xid, SUCCESS,
-                                 struct.pack("!I", NFS_OK) + pack_fattr(st)
+                                 struct.pack("!I", NFS_OK) + self.attrs(st)
                                  + pack_string(chunk))
 
         if proc == 16:                                    # READDIR
@@ -485,8 +600,12 @@ class Server:
             index = cookie
             while index < len(names):
                 name = names[index]
+                try:
+                    fileid = os.lstat(os.path.join(path, name)).st_ino & 0xFFFFFFFF
+                except OSError:
+                    fileid = index + 1
                 entry = (struct.pack("!I", 1)             # another entry
-                         + struct.pack("!I", index + 1)   # fileid, near enough
+                         + struct.pack("!I", fileid)
                          + pack_string(name)
                          + struct.pack("!I", index + 1))  # cookie
                 if len(entry) > budget:
@@ -556,6 +675,15 @@ def main():
                     help="allow writes to this exact file (repeatable).  "
                          "Everything else stays read-only; a diskless SunOS "
                          "client needs it for its swap file.")
+    ap.add_argument("--writable-tree", action="append", default=[],
+                    metavar="DIR",
+                    help="allow writes anywhere under DIR (repeatable).  A "
+                         "client with a real root filesystem needs this; a "
+                         "client that only swaps does not.")
+    ap.add_argument("--squash-to-root", action="store_true",
+                    help="report every file as owned by root.  A SunOS root is "
+                         "root-owned throughout, but this server must own the "
+                         "files on disk to be able to write them.")
     ap.add_argument("--no-register", action="store_true",
                     help="do not register with the portmapper")
     ap.add_argument("--debug", action="store_true")
@@ -567,9 +695,14 @@ def main():
     allow = {a for a in args.allow.split(",") if a}
 
     export = Export(root, debug=args.debug)
-    server = Server(export, args.port, allow, args.debug, args.writable)
-    for w in server.writable:
-        print(f"writable: {w}", file=sys.stderr)
+    server = Server(export, args.port, allow, args.debug, args.writable,
+                    args.writable_tree, args.squash_to_root)
+    for w in sorted(server.writable):
+        print(f"writable file: {w}", file=sys.stderr)
+    for t in server.writable_trees:
+        print(f"writable tree: {t}", file=sys.stderr)
+    if server.squash:
+        print("reporting every file as owned by root", file=sys.stderr)
 
     if not args.no_register:
         for prog, vers, what in ((NFSPROG, NFSVERS, "nfs v2"),

@@ -146,9 +146,20 @@ start_nfs2d() {
 	# Each sunos client swaps over NFS, so its swap file -- and nothing else
 	# in the export -- has to be writable.
 	set --
+	squash=
 	for n in $(clients | awk '$5 == "sunos" { print $1 }'); do
-		set -- "$@" --writable "$NFSROOT/$n/swap"
+		if [ -f "$NFSROOT/$n/etc/rc.boot" ]; then
+			# A real root filesystem: the whole tree is writable, and
+			# it is owned by us rather than by root, so tell nfs2d to
+			# report root ownership -- which is what SunOS expects.
+			set -- "$@" --writable-tree "$NFSROOT/$n"
+			squash=--squash-to-root
+			say "$n has a SunOS root filesystem: serving it read-write"
+		else
+			set -- "$@" --writable "$NFSROOT/$n/swap"
+		fi
 	done
+	[ -z "$squash" ] || set -- "$@" "$squash"
 	# SunOS sends NFS to 2049 without asking the portmapper, so this has to
 	# be the server sitting there.
 	spawn nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
