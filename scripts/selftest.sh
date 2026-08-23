@@ -226,8 +226,13 @@ else
 			# check against; the meaningful check is that the tree is
 			# writable at all.
 			if [ -f "$NFSROOT/$n/etc/rc.boot" ]; then
-				set -- --expect-writable swap
-				what="root filesystem writable"
+				# A real root is walked by the client through
+				# symlinks -- /bin, /lib, /usr/lib/ld.so -- so
+				# READLINK has to work on the handle LOOKUP
+				# returned, not only on plain files.
+				set -- --expect-writable swap \
+					--check-symlinks "$NFSROOT/$n"
+				what="root writable, symlinks resolvable"
 			else
 				set -- --expect-writable swap --expect-readonly "$want"
 				what="swap writable, $want not"

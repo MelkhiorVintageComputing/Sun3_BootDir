@@ -181,6 +181,9 @@ def probe_v2(sock, args, export):
     if args.expect_writable or args.expect_readonly:
         if not check_writability(sock, args, fh, nport):
             return 1
+    if args.check_symlinks:
+        if not check_symlinks(sock, args, fh, nport, args.check_symlinks):
+            return 1
 
     print(f"\nOK: a SunOS boot program could mount {export} and read "
           f"{args.file} over NFSv2")
@@ -188,7 +191,9 @@ def probe_v2(sock, args, export):
 
 
 NFSPROC2_WRITE = 8
+NFSPROC2_READLINK = 5
 NFSERR_ROFS = 30
+NFLNK = 5
 
 
 def v2_lookup(sock, args, dirfh, nport, name):
@@ -257,6 +262,54 @@ def check_writability(sock, args, dirfh, nport):
     return True
 
 
+def check_symlinks(sock, args, dirfh, nport, localdir):
+    """Does every symlink in the export root read back as itself?
+
+    A SunOS root is held together by symlinks -- /bin, /lib, /usr/lib/ld.so --
+    and the client resolves them itself, so it must be able to READLINK the
+    handle LOOKUP gave it.  A server that hands back the *target's* handle
+    instead answers LOOKUP with NFLNK attributes and then fails the READLINK,
+    which the client sees as an I/O error on a path that plainly exists.
+
+    Reads the directory locally to decide what to ask for, so the check keeps
+    up with whatever the root actually contains.
+    """
+    links = sorted(n for n in os.listdir(localdir)
+                   if os.path.islink(os.path.join(localdir, n)))
+    if not links:
+        print("no symlinks in the export root to check")
+        return True
+    for name in links:
+        want = os.readlink(os.path.join(localdir, name))
+        reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                         NFSPROC2_LOOKUP, dirfh + xdr_string(name))
+        d = Decoder(reply)
+        if d.u32() != 0:
+            print(f"\nLOOKUP {name}: failed, but it is a symlink on disk")
+            return False
+        fh = d.fixed(32)
+        ftype = d.u32()
+        if ftype != NFLNK:
+            print(f"\nLOOKUP {name} -> type {ftype}, expected NFLNK ({NFLNK})")
+            return False
+        d.off += 64
+        reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                         NFSPROC2_READLINK, fh)
+        d = Decoder(reply)
+        status = d.u32()
+        if status != 0:
+            print(f"\nREADLINK {name} -> NFSv2 error {status}; the client "
+                  f"cannot resolve /{name} and every path through it fails")
+            return False
+        got = d.opaque().decode(errors="replace")
+        if got != want:
+            print(f"\nREADLINK {name} -> '{got}', on disk it is '{want}'")
+            return False
+    print(f"READLINK           -> {len(links)} symlinks in the export root "
+          f"all read back correctly")
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -272,6 +325,10 @@ def main():
     ap.add_argument("--expect-readonly", metavar="NAME", default=None,
                     help="NFSv2 only: check a write to NAME is refused with "
                          "ROFS, so a kernel beside the swap file stays safe")
+    ap.add_argument("--check-symlinks", metavar="DIR", default=None,
+                    help="NFSv2 only: LOOKUP and READLINK every symlink in the "
+                         "export root and compare with DIR on disk -- a SunOS "
+                         "root cannot be walked without working symlinks")
     ap.add_argument("--nfs-port", type=int, default=None,
                     help="send NFS straight to this port instead of asking the "
                          "portmapper -- what SunOS does, which is why 2049 has "

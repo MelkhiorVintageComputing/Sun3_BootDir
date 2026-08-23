@@ -189,8 +189,42 @@ class Export:
         return path
 
     def contains(self, path):
-        real = os.path.realpath(path)
+        # canon(), not realpath(): a symlink belongs to the export whatever it
+        # points at, because the client -- not the server -- resolves it, in
+        # its own namespace.  /usr/ucb/newaliases -> /usr/lib/sendmail means
+        # the client's /usr/lib/sendmail.  Nothing here dereferences a final
+        # symlink (every open below passes O_NOFOLLOW), so answering with the
+        # link itself cannot reach outside the tree.
+        real = canon(path)
         return real == self.root or real.startswith(self.root + os.sep)
+
+
+def canon(path):
+    """The path a file handle is minted from: the parent resolved, the last
+    component left exactly as it is.
+
+    os.path.realpath() would resolve a trailing symlink too, and then LOOKUP
+    would answer with the symlink's attributes but the *target's* handle.  The
+    client, seeing NFLNK, calls READLINK on that handle -- and READLINK on the
+    target fails, because the target is not a symlink.  A SunOS root is full of
+    symlinks (/bin, /lib, /usr/lib/ld.so), so that is not a corner case.
+    """
+    parent, name = os.path.split(path)
+    if name in ("", ".", ".."):
+        return os.path.realpath(path)
+    return os.path.join(os.path.realpath(parent), name)
+
+
+def opennofollow(path, mode):
+    """open(), but never through a symlink.
+
+    A file handle names one object.  If the object is a symlink the client
+    resolves it itself and comes back with a handle for whatever it found, so
+    the server has no business dereferencing one -- and doing so is how a link
+    pointing out of the export would turn into a read of a host file.
+    """
+    flags = os.O_RDONLY if mode == "rb" else os.O_RDWR
+    return os.fdopen(os.open(path, flags | os.O_NOFOLLOW), mode)
 
 
 def nfs_type(mode):
@@ -413,14 +447,15 @@ class Server:
                 if proc == 14:
                     os.mkdir(target, perm if perm else 0o755)
                 else:
-                    fd = os.open(target, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, perm)
+                    fd = os.open(target, os.O_CREAT | os.O_WRONLY
+                                 | os.O_TRUNC | os.O_NOFOLLOW, perm)
                     if size not in (0, 0xFFFFFFFF):
                         os.ftruncate(fd, size)
                     os.close(fd)
                 st = os.lstat(target)
             except OSError as exc:
                 return err(errno_to_nfs(exc), f" {self.shortname(target)}")
-            handle = self.export.remember(os.path.realpath(target))
+            handle = self.export.remember(canon(target))
             self.log(f"{who} {op} {self.shortname(target)} -> OK")
             return self.accepted(xid, SUCCESS,
                                  struct.pack("!I", NFS_OK) + handle + self.attrs(st))
@@ -433,7 +468,7 @@ class Server:
                 os.rmdir(target) if proc == 15 else os.remove(target)
             except OSError as exc:
                 return err(errno_to_nfs(exc), f" {self.shortname(target)}")
-            self.export.by_handle.pop(Export.handle_for(os.path.realpath(target)), None)
+            self.export.by_handle.pop(Export.handle_for(canon(target)), None)
             self.log(f"{who} {op} {self.shortname(target)} -> OK")
             return status_only(NFS_OK)
 
@@ -448,7 +483,7 @@ class Server:
                 os.rename(src, dst)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
-            self.export.remember(os.path.realpath(dst))
+            self.export.remember(canon(dst))
             self.log(f"{who} RENAME {self.shortname(src)} -> {self.shortname(dst)}")
             return status_only(NFS_OK)
 
@@ -475,7 +510,7 @@ class Server:
                 os.symlink(to, target)
             except OSError as exc:
                 return err(errno_to_nfs(exc), f" {self.shortname(target)}")
-            self.export.remember(target)
+            self.export.remember(canon(target))
             self.log(f"{who} SYMLINK {self.shortname(target)} -> {to}")
             return status_only(NFS_OK)
 
@@ -490,10 +525,13 @@ class Server:
             # change one field without knowing the others.
             mode, uid, gid, size = d.u32(), d.u32(), d.u32(), d.u32()
             try:
-                if size != 0xFFFFFFFF:
-                    with open(path, "r+b") as fh:
+                if size != 0xFFFFFFFF and stat.S_ISREG(os.lstat(path).st_mode):
+                    with opennofollow(path, "r+b") as fh:
                         fh.truncate(size)
                     self.log(f"{who} SETATTR {self.shortname(path)} size={size} -> OK")
+                elif size != 0xFFFFFFFF:
+                    self.log(f"{who} SETATTR {self.shortname(path)} "
+                             f"(size ignored: not a regular file) -> OK")
                 else:
                     # mode, uid and gid we cannot honour as an ordinary user,
                     # and a swap file does not care.  Report success with the
@@ -516,8 +554,10 @@ class Server:
                 return err(NFSERR_STALE)
             if not self.is_writable(path):
                 return err(NFSERR_ROFS, f" {self.shortname(path)}")
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                return err(NFSERR_IO, f" {self.shortname(path)} is not a regular file")
             try:
-                with open(path, "r+b") as fh:
+                with opennofollow(path, "r+b") as fh:
                     fh.seek(offset)
                     fh.write(data)
                 st = os.lstat(path)
@@ -563,7 +603,7 @@ class Server:
                 st = os.lstat(target)
             except OSError as exc:
                 return err(errno_to_nfs(exc), f" {name} in {self.shortname(path)}")
-            handle = self.export.remember(os.path.realpath(target))
+            handle = self.export.remember(canon(target))
             self.log(f"{who} LOOKUP {name} in {self.shortname(path)} -> OK")
             return self.accepted(xid, SUCCESS,
                                  struct.pack("!I", NFS_OK) + handle + self.attrs(st))
@@ -575,7 +615,7 @@ class Server:
             try:
                 target = os.readlink(path)
             except OSError as exc:
-                return err(errno_to_nfs(exc))
+                return err(errno_to_nfs(exc), f" {self.shortname(path)}")
             self.log(f"{who} READLINK {self.shortname(path)} -> {target}")
             return self.accepted(xid, SUCCESS,
                                  struct.pack("!I", NFS_OK) + pack_string(target))
@@ -591,7 +631,13 @@ class Server:
                 st = os.lstat(path)
                 if stat.S_ISDIR(st.st_mode):
                     return err(NFSERR_ISDIR)
-                with open(path, "rb") as fh:
+                # A device node in the export is a name and a pair of numbers
+                # for the client's own kernel to act on; opening it here would
+                # open this host's device of the same numbers.  No client reads
+                # one over NFS, and this server will not offer to.
+                if not stat.S_ISREG(st.st_mode):
+                    return err(NFSERR_IO, f" {self.shortname(path)} is not a regular file")
+                with opennofollow(path, "rb") as fh:
                     fh.seek(offset)
                     chunk = fh.read(count)
             except OSError as exc:

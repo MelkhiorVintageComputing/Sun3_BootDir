@@ -333,23 +333,25 @@ which is why `rarpd` matters for a Sun-2 running SunOS and not for one running
 NetBSD. `start.sh` picks `ndbootd`'s first stage from the payload word, and
 says which one it chose.
 
-### tools/nfs2d.py, a read-only NFSv2 server
+### tools/nfs2d.py, an unprivileged NFSv2 server
 
 SunOS 4.0.3 is from 1989. NFSv3 is from 1995. `boot.sun2` and the SunOS kernel
 speak NFS version 2, which unfs3 does not serve, and this host's kernel has no
 `CONFIG_NFSD_V2` (and would want root anyway). So `tools/nfs2d.py` serves NFS
-version 2 and MOUNT version 1, in about 490 lines of Python, as an ordinary
+version 2 and MOUNT version 1, in about 800 lines of Python, as an ordinary
 user.
 
 It runs **alongside** unfs3 rather than instead of it. RPC programs register per
 version, so the two do not collide:
 
 ```
-100003  3  udp  2049   nfs      unfs3     NetBSD clients
-100005  3  udp  2049   mountd   unfs3
-100003  2  udp  2050   nfs      nfs2d     SunOS clients
-100005  1  udp  2050   mountd   nfs2d
+100003  3  udp  2050   nfs      unfs3     NetBSD clients
+100005  3  udp  2050   mountd   unfs3
+100003  2  udp  2049   nfs      nfs2d     SunOS clients
+100005  1  udp  2049   mountd   nfs2d
 ```
+
+Which of the two sits on 2049 is not a free choice; see the next section.
 
 Both Sun-3s and the Sun-2 can boot at the same time, each over the version it
 understands. `nfs2d` registers itself through the portmapper, so its port is
@@ -551,16 +553,52 @@ Two things that are *not* the lever, so nobody spends the afternoon on them:
 
 ### How far this gets
 
-To the kernel, and no further. The chain is proven up to and including
-`boot.sun2` reading `vmunix` out of the NFS root. What happens next is that the
-kernel does RARP and bootparams **again for itself**, mounts root, and tries to
-run `/usr/etc/init` out of it.
+Into userland. The kernel does RARP and bootparams **again for itself**, mounts
+the root, and execs `/sbin/init` out of it. `log/nfs2d.log` shows exactly that,
+and it is worth knowing how to read, because the client's console says far less:
 
-That needs a populated, writable SunOS root filesystem, which is not in
-`netboot/` and is not something this directory has. Expect the kernel to load,
-start, and then fail to find a userland. Getting past that is the same problem
-as "A real NFS root, later" below, with SunOS's ownership and device nodes on
-top.
+```
+LOOKUP sbin in sun2_f_m -> OK     the kernel resolving /sbin/init
+LOOKUP init in sun2_f_m/sbin -> OK
+READ init 0+8192 -> 8192          six of these: 6 x 8192 = 49152, init's
+...                               exact size, so it loaded whole
+LOOKUP etc in sun2_f_m -> OK      init running, resolving /etc/rc.boot
+LOOKUP rc.boot in sun2_f_m/etc -> OK
+LOOKUP core in sun2_f_m -> OK     ...and something dying with cwd = /
+CREATE sun2_f_m/core -> OK
+SETATTR sun2_f_m/core size=0 -> OK
+CREATE sun2_f_m/etc/utmp -> OK    init logging the death, then trying again
+```
+
+`CREATE core` + `SETATTR size=0` with no `WRITE` after it is a core dump that
+started and stopped: the client truncated the file and never sent a byte. Every
+request in that trace was answered `OK` — no NFS call failed — so whatever
+kills the process is on the client side of the wire.
+
+What is **not** in the trace is as informative. There is no `LOOKUP dev`, so
+`/dev/console` was never opened; no `LOOKUP sh` anywhere, and no `READ rc.boot`,
+so no shell was ever exec'd. The failure sits between resolving `/etc/rc.boot`
+and opening the console, which is a handful of instructions into `init`.
+
+Reading that trace did turn up one server-side defect, since fixed. `LOOKUP` was
+minting file handles from `os.path.realpath()`, which resolves a trailing
+symlink too: the client got NFLNK attributes together with the *target's*
+handle, and the `READLINK` that necessarily followed failed with `NFSERR_IO`. A
+SunOS root is held together by symlinks — `/bin`, `/lib`, `/usr/lib/ld.so`,
+most of `/etc` — so nothing that walks a path through one could have worked.
+`init` had not reached a symlink yet, which is the only reason it went unnoticed.
+`selftest.sh` now `READLINK`s every symlink in the export root and compares the
+answer with the disk.
+
+Two related sharp edges went with it. A file handle now names one object and the
+server never dereferences a final symlink (`O_NOFOLLOW` on every open), so a
+link pointing out of the export — this root has three, e.g.
+`/usr/ucb/newaliases -> /usr/lib/sendmail` — is handed to the client to resolve
+in *its* namespace instead of being followed into this host's filesystem. And
+`READ`/`WRITE` now refuse anything that is not a regular file, so the ~130
+device nodes in `/dev` cannot be opened here by their host-side numbers. (Their
+`rdev` values are reported correctly: SunOS's `(major << 8) | minor` and Linux's
+encoding agree for every node in this tree.)
 
 ## What needs root, and why only that
 
@@ -728,7 +766,7 @@ config/     the one file you edit
 scripts/    everything unprivileged
 root/       the one thing that is not
 tools/      protocol probes (bp-probe.py, nfs-probe.py, tftp-bcast-probe.py,
-            nd-probe.py) and nfs2d.py, a read-only NFSv2 server
+            nd-probe.py) and nfs2d.py, an unprivileged NFSv2 server
             and sun3conf.py, which reads the client table for them
 sbin/       the daemons; four carry capabilities
 etc/        generated configuration
