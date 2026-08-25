@@ -99,6 +99,60 @@ if clients | awk '$4 == "sun2" { found = 1 } END { exit !found }'; then
 	SUN2_FILES="sun2-bootyy sun2-netboot sun2-$SUN2_KERNEL"
 fi
 
+# --- NetBSD 2.0 for sun2, with a real root ----------------------------------
+# A different release from the one above, and old enough that it lives in the
+# archive rather than on the mirrors: its own base URL, its own MD5 files, its
+# own copies of bootyy and netboot.  Only fetched when the table asks for it.
+#
+# archive.netbsd.org puts a "trivial botcatcher" in front of the big files: a
+# form asking what you are here for, whose answer is a key= parameter.  Say
+# NetBSD, because that is what we are here for.
+archive_fetch() {  # archive_fetch <url> <destination>
+	[ -f "$2" ] && { say "have $(basename "$2")"; return 0; }
+	say "downloading $(basename "$2")"
+	curl -fsSL --retry 3 -o "$2.part" "$1?key=NetBSD"
+	mv "$2.part" "$2"
+}
+
+NETBSD2_FILES=
+if clients | awk '$5 == "netbsd2" { found = 1 } END { exit !found }'; then
+	NB2_BASE=https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-$NETBSD2_RELEASE/sun2
+	NB2_KERNEL=$NETBSD2_KERNEL_SUN2
+	say "a netbsd2 client is configured; fetching NetBSD $NETBSD2_RELEASE/sun2"
+
+	for f in bootyy netboot; do
+		archive_fetch "$NB2_BASE/installation/netboot/$f" "$DIST/netbsd2-$f"
+		cp -f "$DIST/netbsd2-$f" "$BOOTDIR/payload/netbsd2-$f"
+	done
+
+	archive_fetch "$NB2_BASE/binary/kernel/$NB2_KERNEL.gz" "$DIST/netbsd2-$NB2_KERNEL.gz"
+	archive_fetch "$NB2_BASE/binary/kernel/MD5"            "$DIST/netbsd2-kernel-MD5"
+	say "verifying netbsd2 $NB2_KERNEL.gz against the upstream MD5 file"
+	want=$(awk -v f="($NB2_KERNEL.gz)" '$2 == f { print $4 }' "$DIST/netbsd2-kernel-MD5")
+	[ -n "$want" ] || die "$NB2_KERNEL.gz is not listed in the NetBSD $NETBSD2_RELEASE MD5 file -- check NETBSD2_KERNEL_SUN2"
+	got=$(md5sum <"$DIST/netbsd2-$NB2_KERNEL.gz" | cut -d' ' -f1)
+	[ "$want" = "$got" ] || die "MD5 mismatch for netbsd2 $NB2_KERNEL.gz (want $want, got $got)"
+
+	say "decompressing netbsd2 $NB2_KERNEL"
+	gzip -dc "$DIST/netbsd2-$NB2_KERNEL.gz" >"$BOOTDIR/payload/netbsd2-$NB2_KERNEL.new"
+	mv "$BOOTDIR/payload/netbsd2-$NB2_KERNEL.new" "$BOOTDIR/payload/netbsd2-$NB2_KERNEL"
+
+	# The distribution sets.  These are the root filesystem itself, not
+	# something the PROM ever fetches, so they stay in dist/ and
+	# scripts/04-make-netbsd2-root.sh unpacks them; base.tgz alone is 74MB.
+	archive_fetch "$NB2_BASE/binary/sets/MD5" "$DIST/netbsd2-sets-MD5"
+	for f in $NETBSD2_SETS; do
+		archive_fetch "$NB2_BASE/binary/sets/$f.tgz" "$DIST/netbsd2-$f.tgz"
+		want=$(awk -v f="($f.tgz)" '$2 == f { print $4 }' "$DIST/netbsd2-sets-MD5")
+		[ -n "$want" ] || die "$f.tgz is not listed in the NetBSD $NETBSD2_RELEASE sets MD5 file -- check NETBSD2_SETS"
+		got=$(md5sum <"$DIST/netbsd2-$f.tgz" | cut -d' ' -f1)
+		[ "$want" = "$got" ] || die "MD5 mismatch for netbsd2 $f.tgz (want $want, got $got)"
+		say "verified $f.tgz"
+	done
+
+	NETBSD2_FILES="netbsd2-bootyy netbsd2-netboot netbsd2-$NB2_KERNEL"
+fi
+
 # --- SunOS 4.0.3 for sun2 ---------------------------------------------------
 # Not a download: these come off a local tape extraction, and that directory is
 # read-only as far as we are concerned.  Copy them in under sunos- names and
@@ -126,14 +180,23 @@ if [ "${NETBSD_FETCH_MINIROOT:-no}" = yes ]; then
 fi
 
 # --- local manifest ---------------------------------------------------------
+# Everything this run put in payload/, in the order it was fetched.
+# shellcheck disable=SC2086
+ALL_FILES="netboot $KERNEL $SUN2_FILES $NETBSD2_FILES $SUNOS_FILES"
 MANIFEST=$BOOTDIR/payload/SHA256SUMS
 if [ -f "$MANIFEST" ]; then
 	say "verifying against payload/SHA256SUMS"
 	( cd "$BOOTDIR/payload" && sha256sum -c --ignore-missing SHA256SUMS ) \
 		|| die "payload changed unexpectedly; delete payload/SHA256SUMS if that was intentional"
+	# Adding a client can add a file the manifest predates.  Record those
+	# rather than leaving them the only unchecked things in the directory.
+	for f in $ALL_FILES; do
+		grep -q "  $f\$" "$MANIFEST" && continue
+		( cd "$BOOTDIR/payload" && sha256sum "$f" >>SHA256SUMS )
+		say "added $f to payload/SHA256SUMS"
+	done
 else
-	# shellcheck disable=SC2086
-	( cd "$BOOTDIR/payload" && sha256sum netboot "$KERNEL" $SUN2_FILES $SUNOS_FILES >SHA256SUMS )
+	( cd "$BOOTDIR/payload" && sha256sum $ALL_FILES >SHA256SUMS )
 	say "recorded payload/SHA256SUMS"
 fi
 

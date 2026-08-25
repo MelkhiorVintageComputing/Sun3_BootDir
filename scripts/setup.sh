@@ -6,12 +6,30 @@
 
 . "$(dirname -- "$0")/common.sh"
 
-for s in 00-fetch-packages 01-build-rpcbind 01-build-atftpd 01-build-unfs3 \
-         01-build-ndbootd 02-fetch-payload 03-configure; do
+run() {
+	_s=$1; shift
 	echo
-	echo "########## $s"
-	"$BOOTDIR/scripts/$s.sh"
+	echo "########## $_s${1:+ $1}"
+	"$BOOTDIR/scripts/$_s.sh" "$@"
+}
+
+for s in 00-fetch-packages 01-build-rpcbind 01-build-atftpd 01-build-unfs3 \
+         01-build-ndbootd 02-fetch-payload; do
+	run "$s"
 done
+
+# A netbsd2 client needs a root filesystem unpacked, which needs no privilege
+# and so belongs here -- but only when there is not one already.  The script
+# unpacks over whatever it finds, and the machine may be running out of it.
+for n in $(clients | awk '$5 == "netbsd2" { print $1 }'); do
+	if [ -f "$NFSROOT/$n/etc/rc.conf" ]; then
+		say "$n already has a NetBSD root filesystem; leaving it alone"
+	else
+		run 04-make-netbsd2-root "$n"
+	fi
+done
+
+run 03-configure
 
 cat <<EOF
 

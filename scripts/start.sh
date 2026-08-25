@@ -98,24 +98,20 @@ start_ndbootd() {
 		warn "  (ndbootd is new, and capabilities do not survive a rebuild)."
 		return 0 ;;
 	esac
-	# The first stage differs entirely between the two payloads, and ndbootd
-	# serves exactly one.  NetBSD's bootyy speaks ND onwards; SunOS's sun2.bb
-	# stops using ND immediately and goes off to RARP and TFTP instead.
-	sun2_payloads=$(clients | awk '$4 == "sun2" { print $5 }' | sort -u)
-	set -- $sun2_payloads
-	if [ $# -gt 1 ]; then
-		warn "sun2 clients ask for different payloads ($*) -- ndbootd serves one"
-		warn "  first stage, so using $1; give the others their own ndbootd"
+	# The first stage differs entirely between the payloads: NetBSD's bootyy
+	# speaks ND onwards, SunOS's sun2.bb stops using ND immediately and goes
+	# off to RARP and TFTP instead.  ndbootd is patched to find each client's
+	# in a directory by its own name, exactly as it already finds the second
+	# stage (src/ndbootd-boot1-dir.patch), and 03-configure.sh fills it.
+	missing=
+	for ip in $(clients | awk '$4 == "sun2" { print $3 }'); do
+		[ -e "$NDBOOT/$(tftpname "$ip" sun2)" ] || missing="$missing $ip"
+	done
+	if [ -n "$missing" ]; then
+		warn "no ND first stage in ndboot/ for:$missing"
+		warn "  run scripts/02-fetch-payload.sh and scripts/03-configure.sh"
 	fi
-	case $1 in
-	sunos) boot1=$BOOTDIR/payload/sunos-sun2.bb ;;
-	*)     boot1=$BOOTDIR/payload/sun2-bootyy ;;
-	esac
-	if [ ! -f "$boot1" ]; then
-		warn "$boot1 missing -- run scripts/02-fetch-payload.sh; no sun2 can boot"
-		return 0
-	fi
-	say "ndbootd first stage: ${boot1#"$BOOTDIR"/} ($1)"
+	say "ndbootd first stages: ${NDBOOT#"$BOOTDIR"/}/, second stages: ${TFTPBOOT#"$BOOTDIR"/}/"
 
 	# ndbootd binds one interface per instance and has no -a.  With every
 	# sun2 on one segment that is fine; more than one would need more than
@@ -130,36 +126,24 @@ start_ndbootd() {
 	fi
 	# -s tftpboot: find each client's second stage by its hex name there,
 	#    exactly as atftpd does for a Sun-3.
-	# The trailing argument is the first stage, ND blocks 1-15.
-	spawn ndbootd "$SBIN/ndbootd" -d -i "$1" -s "$TFTPBOOT" "$boot1"
+	# The trailing argument is where the first stage -- ND blocks 1-15 --
+	#    is found, by that same per-client name.
+	spawn ndbootd "$SBIN/ndbootd" -d -i "$1" -s "$TFTPBOOT" "$NDBOOT"
 }
 
 start_nfs2d() {
-	# SunOS 4.0.3 is from 1989 and speaks NFS version 2; unfs3 serves version
-	# 3 and nothing else.  They register under different version numbers, so
-	# both run at once and each client uses the one it can talk to.
-	if [ -z "$(clients | awk '$5 == "sunos"')" ]; then
-		say "no sunos client configured; not starting nfs2d"
+	# SunOS 4.0.3 is from 1989 and speaks NFS version 2; so does every NetBSD
+	# bootstrap, and a NetBSD 2.0 kernel will too once nothing offers it
+	# version 3.  unfs3 serves version 3 and nothing else.
+	if [ -z "$(clients | awk '$5 == "sunos" || $5 == "netbsd2"')" ]; then
+		say "no sunos or netbsd2 client configured; not starting nfs2d"
 		return 0
 	fi
 	is_running rpcbind || warn "rpcbind is not running; nfs2d will fail to register"
-	# Each sunos client swaps over NFS, so its swap file -- and nothing else
-	# in the export -- has to be writable.
-	set --
-	squash=
-	for n in $(clients | awk '$5 == "sunos" { print $1 }'); do
-		if [ -f "$NFSROOT/$n/etc/rc.boot" ]; then
-			# A real root filesystem: the whole tree is writable, and
-			# it is owned by us rather than by root, so tell nfs2d to
-			# report root ownership -- which is what SunOS expects.
-			set -- "$@" --writable-tree "$NFSROOT/$n"
-			squash=--squash-to-root
-			say "$n has a SunOS root filesystem: serving it read-write"
-		else
-			set -- "$@" --writable "$NFSROOT/$n/swap"
-		fi
-	done
-	[ -z "$squash" ] || set -- "$@" "$squash"
+	# What it is asked to serve, and why, is worked out in common.sh so that
+	# scripts/dryrun.sh rehearses the same thing.
+	# shellcheck disable=SC2046
+	set -- $(nfs2d_args)
 	# SunOS sends NFS to 2049 without asking the portmapper, so this has to
 	# be the server sitting there.
 	spawn nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
@@ -206,6 +190,12 @@ start_bootparamd() {
 }
 
 start_unfsd() {
+	if nfs2d_answers_every_version; then
+		say "a netbsd2 client is configured, so nfs2d answers every MOUNT"
+		say "  version and unfsd would never be reached; not starting it."
+		say "  See README, \"Which server answers MOUNT\"."
+		return 0
+	fi
 	[ -x "$SBIN/unfsd" ] || die "sbin/unfsd missing -- run scripts/01-build-unfs3.sh"
 	[ -r "$ETC/exports" ] || die "etc/exports missing -- run scripts/03-configure.sh"
 	is_running rpcbind || warn "rpcbind is not running; unfsd will fail to register"

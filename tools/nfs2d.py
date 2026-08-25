@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
-"""A read-only NFS version 2 server, over UDP, for booting SunOS.
+"""An NFS version 2 server, over UDP, for booting SunOS and old NetBSD.
 
 Why this exists: SunOS 4.0.3 is from 1989 and speaks NFSv2, which came out in
 1985.  NFSv3 is from 1995.  `boot.sun2` and the SunOS kernel can therefore not
 read a kernel out of unfs3, which serves NFSv3 and nothing else, and this
 host's kernel is built without CONFIG_NFSD_V2 so the in-kernel server cannot
-fill the gap either -- and would want root in any case.
+fill the gap either -- and would want root in any case.  A NetBSD/sun2
+bootstrap of any vintage is in the same position: its libsa NFS client is
+version 2 only.
 
-So this serves NFS version 2 (program 100003) and MOUNT version 1 (100005)
+So this serves NFS version 2 (program 100003) and the MOUNT protocol (100005)
 alongside unfs3 rather than in place of it: different version numbers register
-independently with the portmapper, so a NetBSD client keeps using unfs3 over
-NFSv3 and a SunOS client comes here.  Both can boot at the same time.
+independently with the portmapper, so a NetBSD client that wants NFSv3 keeps
+using unfs3 and a version 2 client comes here.  Both can boot at the same
+time.  --mount-versions changes that when a client needs it to.
 
-It is read-only apart from the files named by --writable, which exist because
-a diskless SunOS client swaps over NFS and so must be able to write its swap
-file.  Everything else -- the kernels sitting in the same export -- still
-returns NFSERR_ROFS, as does anything that would create or remove a name.
+Writes go only where they are allowed to: --writable names a single file (a
+diskless SunOS client swaps over NFS and so must be able to write its swap
+file), --writable-tree a whole root filesystem.  Everything else returns
+NFSERR_ROFS, as does anything that would create or remove a name.
+
+A real root filesystem needs a /dev, and mknod(2) is privileged.  --devices
+takes the specfile NetBSD's own dev/MAKEDEV writes with -s and reports the
+ordinary placeholder files named in it as the device nodes they stand for.
+Nothing ever reads a device node over NFS -- it is a name and a pair of
+numbers for the client's own kernel -- so that is the whole of what a client
+needs.
 
 Runs as an ordinary user.  Nothing here needs a privileged port: the client
 finds us through the portmapper.
@@ -36,7 +46,13 @@ PMAPPROG, PMAPVERS = 100000, 2
 PMAPPROC_SET, PMAPPROC_UNSET = 1, 2
 IPPROTO_UDP_RPC = 17
 
-MOUNTPROG, MOUNTVERS = 100005, 1
+MOUNTPROG = 100005
+# Both versions of the MOUNT protocol we speak.  Version 1 is RFC 1094;
+# version 2 (MOUNTVERS_POSIX) is the same thing plus a PATHCONF procedure,
+# which nothing here is asked for.  Answering both matters because a NetBSD
+# kernel walks the versions downwards -- 3, then 2, then 1 -- and gives up the
+# moment one of them fails to answer at all, rather than trying the next.
+MOUNT_VERSIONS = (1, 2)
 NFSPROG, NFSVERS = 100003, 2
 
 # RPC
@@ -227,6 +243,91 @@ def opennofollow(path, mode):
     return os.fdopen(os.open(path, flags | os.O_NOFOLLOW), mode)
 
 
+def netbsd_makedev(major, minor):
+    """NetBSD's dev_t: twelve bits of major from bit 8, and a minor split
+    between bits 31-20 and 7-0.  (sys/sys/types.h, unchanged since 1.5.)
+
+    For everything a Sun-2 /dev actually holds -- major well under 4096, minor
+    under 256 -- this comes to (major << 8) | minor, which is how SunOS and
+    Linux spell it too.  The full form is here so that a minor above 255 turns
+    into the number the client expects rather than quietly into a small one.
+    """
+    return (((major << 8) & 0x000FFF00)
+            | ((minor << 12) & 0xFFF00000)
+            | (minor & 0x000000FF))
+
+
+class SpecStat:
+    """What os.lstat() would have said, if we could have made the node.
+
+    A device node is a name and a pair of numbers for the client's own kernel
+    to act on; nothing ever reads one over NFS.  mknod(2) is privileged and
+    this server is not, so the tree holds an ordinary empty file where each
+    node belongs and this stands in for its attributes.
+
+    The times, link count and inode number are the placeholder's own, so the
+    fileid stays unique and stable across a restart like every other file's.
+    """
+
+    def __init__(self, st, mode, uid, gid, rdev):
+        self.st_mode = mode
+        self.st_uid = uid
+        self.st_gid = gid
+        self.st_rdev = rdev
+        self.st_size = 0
+        self.st_blocks = 0
+        self.st_nlink = 1
+        self.st_dev = st.st_dev
+        self.st_ino = st.st_ino
+        self.st_atime = st.st_atime
+        self.st_mtime = st.st_mtime
+        self.st_ctime = st.st_ctime
+        # --squash-to-root exists to paper over ownership we could not set on
+        # disk.  There is none to paper over here: the specfile says who owns
+        # the node, and that is the answer.
+        self.from_spec = True
+
+
+def load_devices(specfiles):
+    """Read mtree(8) specfiles into {path: (mode, uid, gid, rdev)}.
+
+    This is what NetBSD's own dev/MAKEDEV prints with -s, an option it has for
+    exactly this reason -- building a /dev without being root.  Taking the
+    numbers from it rather than writing them out here means they cannot be
+    ours to get wrong, and a different release brings its own.
+
+        ./console type=char device=netbsd,0,0 mode=600 gid=0 uid=0
+
+    Paths are relative to the directory the specfile is in, so the file lives
+    in the /dev it describes.  Only char and block entries are read: a
+    directory in the list is an ordinary directory on disk.
+    """
+    kinds = {"char": stat.S_IFCHR, "block": stat.S_IFBLK}
+    devices = {}
+    for spec in specfiles:
+        base = os.path.dirname(os.path.realpath(spec))
+        with open(spec) as fh:
+            for line in fh:
+                fields = line.split()
+                if not fields or fields[0].startswith("#"):
+                    continue
+                kw = dict(f.split("=", 1) for f in fields[1:] if "=" in f)
+                ifmt = kinds.get(kw.get("type"))
+                if ifmt is None or "device" not in kw:
+                    continue
+                numbers = kw["device"].split(",")
+                # "netbsd,major,minor" names the encoding; some specfiles
+                # leave it out and give the pair on its own.
+                major, minor = (int(n, 0) for n in numbers[-2:])
+                path = os.path.join(base, fields[0][2:] if fields[0].startswith("./")
+                                    else fields[0])
+                devices[canon(path)] = (
+                    ifmt | (int(kw.get("mode", "600"), 8) & 0o7777),
+                    int(kw.get("uid", 0)), int(kw.get("gid", 0)),
+                    netbsd_makedev(major, minor))
+    return devices
+
+
 def nfs_type(mode):
     if stat.S_ISREG(mode):
         return NFREG
@@ -278,7 +379,8 @@ def errno_to_nfs(exc):
 
 class Server:
     def __init__(self, export, port, allow, debug, writable=(),
-                 writable_trees=(), squash=False, tsize=DEFAULT_TSIZE):
+                 writable_trees=(), squash=False, tsize=DEFAULT_TSIZE,
+                 devices=None):
         self.export = export
         self.port = port
         self.allow = allow
@@ -293,6 +395,9 @@ class Server:
         self.writable_trees = [os.path.realpath(t) for t in writable_trees]
         self.squash = squash
         self.tsize = tsize
+        # Paths to report as device nodes rather than as the placeholder files
+        # they are.  Empty for a client that brought its own /dev.
+        self.devices = devices or {}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("0.0.0.0", port))
@@ -310,8 +415,19 @@ class Server:
                 return True
         return False
 
+    def lstat(self, path):
+        """os.lstat(), except where the tree stands in for something this
+        server could not create.  Every attribute a client is told about goes
+        through here."""
+        st = os.lstat(path)
+        if self.devices:
+            spec = self.devices.get(canon(path))
+            if spec is not None:
+                return SpecStat(st, *spec)
+        return st
+
     def attrs(self, st):
-        return pack_fattr(st, self.squash)
+        return pack_fattr(st, self.squash and not getattr(st, "from_spec", False))
 
     def shortname(self, path):
         """Paths relative to the export root, so a line stays readable."""
@@ -368,13 +484,17 @@ class Server:
                                      struct.pack("!II", NFSVERS, NFSVERS))
             return self.nfs(xid, proc, d, addr)
         if prog == MOUNTPROG:
-            if vers != MOUNTVERS:
+            if vers not in MOUNT_VERSIONS:
+                # The whole point of registering a version we do not serve:
+                # this reply is what sends a version-3 client back down to a
+                # version we do.  See --mount-versions.
                 return self.accepted(xid, PROG_MISMATCH,
-                                     struct.pack("!II", MOUNTVERS, MOUNTVERS))
+                                     struct.pack("!II", MOUNT_VERSIONS[0],
+                                                 MOUNT_VERSIONS[-1]))
             return self.mount(xid, proc, d, addr)
         return self.accepted(xid, PROG_UNAVAIL)
 
-    # -------------------------------------------------------------- MOUNT v1
+    # ------------------------------------------------------------ MOUNT v1/v2
     def mount(self, xid, proc, d, addr):
         if proc == 0:                                     # NULL
             return self.accepted(xid, SUCCESS)
@@ -452,7 +572,7 @@ class Server:
                     if size not in (0, 0xFFFFFFFF):
                         os.ftruncate(fd, size)
                     os.close(fd)
-                st = os.lstat(target)
+                st = self.lstat(target)
             except OSError as exc:
                 return err(errno_to_nfs(exc), f" {self.shortname(target)}")
             handle = self.export.remember(canon(target))
@@ -525,7 +645,7 @@ class Server:
             # change one field without knowing the others.
             mode, uid, gid, size = d.u32(), d.u32(), d.u32(), d.u32()
             try:
-                if size != 0xFFFFFFFF and stat.S_ISREG(os.lstat(path).st_mode):
+                if size != 0xFFFFFFFF and stat.S_ISREG(self.lstat(path).st_mode):
                     with opennofollow(path, "r+b") as fh:
                         fh.truncate(size)
                     self.log(f"{who} SETATTR {self.shortname(path)} size={size} -> OK")
@@ -538,7 +658,7 @@ class Server:
                     # attributes unchanged rather than failing the boot.
                     self.log(f"{who} SETATTR {self.shortname(path)} "
                              f"(mode/uid/gid ignored) -> OK")
-                st = os.lstat(path)
+                st = self.lstat(path)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
             return self.accepted(xid, SUCCESS,
@@ -554,13 +674,13 @@ class Server:
                 return err(NFSERR_STALE)
             if not self.is_writable(path):
                 return err(NFSERR_ROFS, f" {self.shortname(path)}")
-            if not stat.S_ISREG(os.lstat(path).st_mode):
+            if not stat.S_ISREG(self.lstat(path).st_mode):
                 return err(NFSERR_IO, f" {self.shortname(path)} is not a regular file")
             try:
                 with opennofollow(path, "r+b") as fh:
                     fh.seek(offset)
                     fh.write(data)
-                st = os.lstat(path)
+                st = self.lstat(path)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
             self.log(f"{who} WRITE {os.path.basename(path)} "
@@ -575,7 +695,7 @@ class Server:
             if path is None:
                 return err(NFSERR_STALE)
             try:
-                st = os.lstat(path)
+                st = self.lstat(path)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
             self.log(f"{who} GETATTR {self.shortname(path)} -> OK")
@@ -600,7 +720,7 @@ class Server:
                 # which is what an exported filesystem looks like from inside.
                 target = self.export.root
             try:
-                st = os.lstat(target)
+                st = self.lstat(target)
             except OSError as exc:
                 return err(errno_to_nfs(exc), f" {name} in {self.shortname(path)}")
             handle = self.export.remember(canon(target))
@@ -628,7 +748,7 @@ class Server:
                 return err(NFSERR_STALE)
             count = min(count, MAXDATA)
             try:
-                st = os.lstat(path)
+                st = self.lstat(path)
                 if stat.S_ISDIR(st.st_mode):
                     return err(NFSERR_ISDIR)
                 # A device node in the export is a name and a pair of numbers
@@ -666,6 +786,8 @@ class Server:
             while index < len(names):
                 name = names[index]
                 try:
+                    # The placeholder's own inode, which is what self.lstat()
+                    # would report for a device node too.
                     fileid = os.lstat(os.path.join(path, name)).st_ino & 0xFFFFFFFF
                 except OSError:
                     fileid = index + 1
@@ -753,6 +875,24 @@ def main():
                     help="report every file as owned by root.  A SunOS root is "
                          "root-owned throughout, but this server must own the "
                          "files on disk to be able to write them.")
+    ap.add_argument("--devices", action="append", default=[],
+                    metavar="SPECFILE",
+                    help="report the paths listed in this mtree(8) specfile "
+                         "as the device nodes they describe (repeatable).  "
+                         "Written by NetBSD's own dev/MAKEDEV -s, so a root "
+                         "filesystem can have a /dev without anyone being "
+                         "root.  Paths in it are relative to the directory "
+                         "the specfile is in.")
+    ap.add_argument("--mount-versions", default="1,2",
+                    metavar="LIST",
+                    help="MOUNT versions to register with the portmapper "
+                         "(default 1,2).  Versions 1 and 2 are served; any "
+                         "other version listed is registered and then "
+                         "answered with PROG_MISMATCH, which is what makes a "
+                         "client that asks for MOUNT version 3 fall back to "
+                         "one this server speaks instead of stopping.  Only "
+                         "list 3 when unfs3 is not running: the portmapper "
+                         "keeps the first registration it is given.")
     ap.add_argument("--no-register", action="store_true",
                     help="do not register with the portmapper")
     ap.add_argument("--debug", action="store_true")
@@ -763,9 +903,26 @@ def main():
         raise SystemExit(f"{root} is not a directory")
     allow = {a for a in args.allow.split(",") if a}
 
+    try:
+        mount_versions = [int(v) for v in args.mount_versions.split(",") if v]
+    except ValueError:
+        raise SystemExit(f"--mount-versions: not a list of numbers: {args.mount_versions}")
+    if not mount_versions:
+        raise SystemExit("--mount-versions: at least one version is needed")
+
+    devices = load_devices(args.devices)
+
     export = Export(root, debug=args.debug)
     server = Server(export, args.port, allow, args.debug, args.writable,
-                    args.writable_tree, args.squash_to_root, args.tsize)
+                    args.writable_tree, args.squash_to_root, args.tsize,
+                    devices)
+    for spec in args.devices:
+        print(f"device nodes: {spec}", file=sys.stderr)
+    if devices:
+        missing = [d for d in devices if not os.path.exists(d)]
+        print(f"{len(devices)} device nodes reported from specfiles"
+              + (f", {len(missing)} with no placeholder file" if missing else ""),
+              file=sys.stderr)
     for w in sorted(server.writable):
         print(f"writable file: {w}", file=sys.stderr)
     for t in server.writable_trees:
@@ -773,9 +930,12 @@ def main():
     if server.squash:
         print("reporting every file as owned by root", file=sys.stderr)
 
+    registered = [(NFSPROG, NFSVERS, "nfs v2")]
+    registered += [(MOUNTPROG, v,
+                    f"mount v{v}" + ("" if v in MOUNT_VERSIONS else " (answered PROG_MISMATCH)"))
+                   for v in mount_versions]
     if not args.no_register:
-        for prog, vers, what in ((NFSPROG, NFSVERS, "nfs v2"),
-                                 (MOUNTPROG, MOUNTVERS, "mount v1")):
+        for prog, vers, what in registered:
             portmap(PMAPPROC_UNSET, prog, vers, 0)
             if not portmap(PMAPPROC_SET, prog, vers, args.port):
                 raise SystemExit(f"the portmapper would not register {what}")
@@ -789,7 +949,7 @@ def main():
         pass
     finally:
         if not args.no_register:
-            for prog, vers in ((NFSPROG, NFSVERS), (MOUNTPROG, MOUNTVERS)):
+            for prog, vers, _ in registered:
                 try:
                     portmap(PMAPPROC_UNSET, prog, vers, 0)
                 except SystemExit:

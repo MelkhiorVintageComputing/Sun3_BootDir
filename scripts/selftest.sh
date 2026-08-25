@@ -79,8 +79,18 @@ EOF
 
 echo
 echo '2. daemons'
+# unfs3 stands down when a netbsd2 client is configured: nfs2d then holds
+# every MOUNT version, so nothing would ever reach unfsd.  README, "Which
+# server answers MOUNT".
+nfs2d_only=$([ -n "$(clients | awk '$5 == "netbsd2"')" ] && echo yes || echo no)
 for d in rarpd atftpd rpcbind bootparamd unfsd; do
-	if is_running "$d"; then ok "$d running"; else no "$d not running"; fi
+	if is_running "$d"; then
+		ok "$d running"
+	elif [ "$d" = unfsd ] && [ "$nfs2d_only" = yes ]; then
+		skip 'unfsd deliberately not running (nfs2d answers every MOUNT version)'
+	else
+		no "$d not running"
+	fi
 done
 if [ -n "$(clients | awk '$4 == "sun2"')" ]; then
 	if is_running ndbootd; then
@@ -89,19 +99,20 @@ if [ -n "$(clients | awk '$4 == "sun2"')" ]; then
 		no 'ndbootd not running, so no sun2 can get an address'
 	fi
 fi
-if [ -n "$(clients | awk '$5 == "sunos"')" ]; then
+if [ -n "$(clients | awk '$5 == "sunos" || $5 == "netbsd2"')" ]; then
 	if is_running nfs2d; then
-		ok 'nfs2d running (a sunos client needs NFSv2)'
+		ok 'nfs2d running (a client here needs NFSv2)'
 	else
-		no 'nfs2d not running, so SunOS cannot read its kernel'
+		no 'nfs2d not running, so no NFSv2 client can read its kernel'
 	fi
 fi
 
 echo
 echo '3. listening sockets'
 listening=$(ss -lnu 2>/dev/null)
-want_ports="69 111 $UNFSD_PORT"
-if [ -n "$(clients | awk '$5 == "sunos"')" ]; then
+want_ports="69 111"
+[ "$nfs2d_only" = yes ] || want_ports="$want_ports $UNFSD_PORT"
+if [ -n "$(clients | awk '$5 == "sunos" || $5 == "netbsd2"')" ]; then
 	want_ports="$want_ports $NFS2D_PORT"
 fi
 for port in $want_ports; do
@@ -193,9 +204,9 @@ else
 fi
 
 echo
-echo "8. NFSv3: every client's root, and the kernel it will ask for"
-if ! is_running unfsd; then
-	skip 'unfsd not running'
+echo "8. NFS: every client's root, and the kernel it will ask for"
+if ! is_running unfsd && ! is_running nfs2d; then
+	skip 'neither unfsd nor nfs2d is running'
 else
 	while read -r n m i a p; do
 		# A Sun-2 PROM passes "vmunix" to netboot; a Sun-3 asks for
@@ -206,9 +217,14 @@ else
 		sun2) want=vmunix ;;
 		*)    want=netbsd ;;
 		esac
+		# ...over the version that machine can speak and that something
+		# here is actually serving.  With a netbsd2 client configured
+		# nfs2d holds every MOUNT version and unfsd is not running, so a
+		# Sun-3 comes here over version 2 too -- which its bootloader
+		# falls back to by itself.  README, "Which server answers MOUNT".
 		case $p in
-		sunos) vers=2 ;;
-		*)     vers=3 ;;
+		sunos|netbsd2) vers=2 ;;
+		*) if is_running unfsd; then vers=3; else vers=2; fi ;;
 		esac
 		if python3 "$BOOTDIR/tools/nfs-probe.py" --client "$n" --file "$want" \
 				--nfs-version "$vers" >"$LOG/nfs-probe-$n.out" 2>&1; then
@@ -220,6 +236,25 @@ else
 		# SunOS asks the portmapper for mountd and then sends NFS to 2049
 		# regardless, so the lookup above can pass while the real boot
 		# fails.  Repeat it the way the machine actually does it.
+		if [ "$p" = netbsd2 ]; then
+			# The root is writable throughout, and its /dev is 855
+			# empty files that only nfs2d knows are device nodes --
+			# so check them all against the specfile, and check that
+			# the MOUNT version walk a NetBSD kernel makes ends
+			# somewhere this server answers.
+			if [ ! -f "$NFSROOT/$n/dev/MAKEDEV.spec" ]; then
+				skip "$n: no root filesystem yet (scripts/04-make-netbsd2-root.sh $n)"
+			elif python3 "$BOOTDIR/tools/nfs-probe.py" --client "$n" --file "$want" \
+					--nfs-version 2 --expect-writable .profile \
+					--check-devices "$NFSROOT/$n/dev/MAKEDEV.spec" \
+					--check-mount-fallback \
+					>"$LOG/nfs-probe-$n-root.out" 2>&1; then
+				ok "$n: root writable, /dev matches its specfile, MOUNT ends at v2"
+			else
+				no "$n: its NetBSD root is not servable as it stands:"
+				sed 's/^/        /' "$LOG/nfs-probe-$n-root.out"
+			fi
+		fi
 		if [ "$p" = sunos ]; then
 			# With a real root filesystem the whole tree is writable by
 			# design, so there is no read-only file left inside it to

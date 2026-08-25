@@ -24,11 +24,20 @@ NFS2D_PORT=${NFS2D_PORT:-2049}
 UNFSD_PORT=${UNFSD_PORT:-2050}
 NFS2D_TSIZE=${NFS2D_TSIZE:-1024}
 
+# payload=netbsd2: a release of its own, old enough to be in the archive only.
+NETBSD2_RELEASE=${NETBSD2_RELEASE:-2.0}
+NETBSD2_KERNEL_SUN2=${NETBSD2_KERNEL_SUN2:-netbsd-DISKLESS}
+NETBSD2_SETS=${NETBSD2_SETS:-'base etc'}
+
 DIST=$BOOTDIR/dist
 PKG=$BOOTDIR/pkg
 SBIN=$BOOTDIR/sbin
 ETC=$BOOTDIR/etc
 TFTPBOOT=$BOOTDIR/tftpboot
+# The ND equivalent: first-stage boot programs, one per client, under the same
+# per-client name.  Not tftpboot/ -- that already holds the second stage under
+# that very name, and atftpd has no business serving these.
+NDBOOT=$BOOTDIR/ndboot
 NFSROOT=$BOOTDIR/nfsroot
 RUN=$BOOTDIR/run
 LOG=$BOOTDIR/log
@@ -94,9 +103,72 @@ check_clients() {
 			# Only the sun2 SunOS boot programs are on hand.  A sun3
 			# SunOS boot would want its own boot.sun3 and vmunix.
 			[ "$a" = sun2 ] || die "client $n: payload sunos is only set up for sun2, not $a" ;;
-		*) die "client $n: payload must be netbsd or sunos, not '$p'" ;;
+		netbsd2)
+			# Same again: the archive release is fetched for sun2
+			# only, because that is the machine it is old enough for.
+			[ "$a" = sun2 ] || die "client $n: payload netbsd2 is only set up for sun2, not $a" ;;
+		*) die "client $n: payload must be netbsd, netbsd2 or sunos, not '$p'" ;;
 		esac
 	done || exit 1
+}
+
+# A NetBSD 2.0 kernel asks the portmapper for MOUNT version 3, then 2, then 1,
+# and stops at the first version that answers at all -- so if unfs3 is there on
+# version 3 it mounts its root over NFSv3, and a netbsd2 root cannot be served
+# that way: its /dev is 855 placeholder files that only nfs2d knows are device
+# nodes.  So when such a client is configured, nfs2d takes every MOUNT version
+# (answering 3 with PROG_MISMATCH, which is what sends the kernel back down to
+# 2) and unfs3 stands down.  Nothing is lost: a NetBSD bootloader falls back to
+# MOUNT version 1 by itself, which is how the Sun-3s keep booting.
+# See README, "Which server answers MOUNT".
+nfs2d_answers_every_version() {
+	[ -n "$(clients | awk '$5 == "netbsd2"')" ]
+}
+
+# The per-client arguments tools/nfs2d.py needs: which trees it may write,
+# which specfiles describe a /dev it could not create, and whether it has to
+# answer every MOUNT version.  Worked out here so that start.sh and dryrun.sh
+# cannot drift apart about what the server is being asked to do.  Arguments go
+# to stdout, the running commentary to stderr.
+nfs2d_args() {
+	_squash=
+	for _n in $(clients | awk '$5 == "sunos" || $5 == "netbsd2" { print $1 }'); do
+		case $(clients | awk -v n="$_n" '$1 == n { print $5 }') in
+		netbsd2)
+			# A whole root filesystem, and one that needs a /dev this
+			# server could not create: mknod(2) is privileged, so the
+			# tree holds a placeholder file per node and the specfile
+			# NetBSD's own MAKEDEV -s wrote says what each one is.
+			printf ' --writable-tree %s' "$NFSROOT/$_n"
+			_squash=--squash-to-root
+			if [ -f "$NFSROOT/$_n/dev/MAKEDEV.spec" ]; then
+				printf ' --devices %s' "$NFSROOT/$_n/dev/MAKEDEV.spec"
+				say "$_n has a NetBSD root filesystem: read-write, /dev from its specfile" >&2
+			else
+				warn "$NFSROOT/$_n has no dev/MAKEDEV.spec, so it has no /dev"
+				warn "  run scripts/04-make-netbsd2-root.sh $_n"
+			fi
+			;;
+		*)
+			# A sunos client swaps over NFS, so its swap file -- and
+			# nothing else in the export -- has to be writable, until
+			# it has a root filesystem of its own.  That tree is owned
+			# by us rather than by root, so nfs2d is told to report
+			# root ownership, which is what SunOS expects.
+			if [ -f "$NFSROOT/$_n/etc/rc.boot" ]; then
+				printf ' --writable-tree %s' "$NFSROOT/$_n"
+				_squash=--squash-to-root
+				say "$_n has a SunOS root filesystem: serving it read-write" >&2
+			else
+				printf ' --writable %s' "$NFSROOT/$_n/swap"
+			fi
+			;;
+		esac
+	done
+	[ -z "$_squash" ] || printf ' %s' "$_squash"
+	# See start.sh, nfs2d_answers_every_version, and README, "Which server
+	# answers MOUNT".
+	[ -z "$(clients | awk '$5 == "netbsd2"')" ] || printf ' --mount-versions 1,2,3'
 }
 
 # The whole boot chain after RARP is ordinary IP: TFTP, bootparams and NFS

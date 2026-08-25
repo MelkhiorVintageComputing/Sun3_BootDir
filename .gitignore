@@ -21,6 +21,7 @@
 # Generated from config/sun3boot.conf by scripts/03-configure.sh
 /etc/
 /tftpboot/
+/ndboot/
 /nfsroot/
 
 # Runtime state

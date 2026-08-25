@@ -4,7 +4,9 @@ Everything needed to boot a Sun-3 (68020: 3/50, 3/60, 3/110, 3/150, 3/160,
 3/260) over Ethernet from this Debian host, plus the scripts to rebuild it all
 from an empty directory.
 
-Also boots a Sun-2, which needs an entirely different protocol; see "A Sun-2".
+Also boots a Sun-2, which needs an entirely different protocol; see "A Sun-2" --
+two of them at once if you like, each running something different: SunOS 4.0.3
+on one and NetBSD 2.0 with a real NFS root on the other.
 
 Almost nothing here runs with privilege. One script needs root and is run once;
 a second, needed only to boot SunOS, adds a single address.
@@ -19,10 +21,14 @@ a second, needed only to boot SunOS, adds a single address.
  3. runs netboot, asks   --- PMAPPROC_CALLIT  rpcbind ---.
     "where is my root?"      to 255.255.255.255:111       `-> rpc.bootparamd
                                                               etc/bootparams
- 4. mounts it and reads  --- NFSv3 ------->   unfsd          etc/exports
+ 4. mounts it and reads  --- NFS   ------->   unfsd          etc/exports
     the kernel                                              nfsroot/sun3/
  5. runs netbsd-RAMDISK
 ```
+
+Step 4 is version 3 unless a `netbsd2` client is configured, in which case
+`nfs2d` answers it over version 2 and `unfsd` does not run at all; `netboot`
+falls back on its own. See "Which server answers MOUNT".
 
 Step 3 is the one that fails silently: `netboot` does not look the boot
 parameter server up by name, it broadcasts an indirect RPC call and waits.
@@ -61,6 +67,7 @@ regenerates everything else from it and is safe to re-run:
 | `etc/bootparams` | rpc.bootparamd | each client's root, and its gateway |
 | `etc/exports` | unfsd | who may mount what |
 | `tftpboot/C0A80079` | atftpd, and rarpd's `-b` check | → the netboot program |
+| `ndboot/C0A8007C.SUN2` | ndbootd | → that Sun-2's ND first stage |
 | `nfsroot/sun3/netbsd` | unfsd | the kernel, hard-linked |
 
 The TFTP filename is the client's IP in uppercase hex. 192.168.0.121 becomes
@@ -75,9 +82,14 @@ table and pick a `3X` kernel.
 CLIENTS='
 sun3	08:00:20:11:22:33	192.168.0.121	sun3
 sun3b	08:00:20:51:45:4D	192.168.0.122	sun3
-sun2_f_m	08:00:20:01:06:e0	192.168.0.123	sun2
+sun2_f_m	08:00:20:01:06:e0	192.168.0.123	sun2	sunos
+sun2b	08:00:20:01:06:e1	192.168.0.124	sun2	netbsd2
 '
 ```
+
+The fifth column is what the machine boots: `netbsd` (the default, NetBSD 10.1
+with a RAMDISK kernel), `sunos` (SunOS 4.0.3), or `netbsd2` (NetBSD 2.0 with a
+real root filesystem). The last two are sun2-only.
 
 An emulated Sun-3 is just another line. `sun3b` above is QEMU on a tap bridged
 into `br0`; its PROM takes its address from RARP exactly like real hardware, so
@@ -165,11 +177,12 @@ reports it as `(no carrier yet)` rather than a failure.
 | `scripts/01-build-atftpd.sh` | none | builds patched upstream atftpd |
 | `scripts/01-build-unfs3.sh` | none | builds unfs3 |
 | `scripts/01-build-ndbootd.sh` | none | builds ndbootd with a Linux AF_PACKET backend |
-| `scripts/02-fetch-payload.sh` | none | fetches NetBSD/sun3 netboot + kernel, checksummed |
+| `scripts/02-fetch-payload.sh` | none | fetches netboot, kernels and sets for every payload in the table, checksummed |
 | `scripts/03-configure.sh` | none | generates `etc/`, `tftpboot/`, `nfsroot/` |
 | `root/grant-privileges.sh` | **root, once** | four `setcap`s and one symlink |
 | `root/allow-oldstyle-broadcast.sh` | **root** | one address, for a SunOS client only |
 | `root/make-sunos-root.sh` | **root, once** | unpacks a SunOS root (needs `mknod`) |
+| `scripts/04-make-netbsd2-root.sh` | none | unpacks a NetBSD 2.0 root, `/dev` included |
 | `scripts/start.sh` | none | starts the daemons (`m1`/`m2`/`m3`, or one by name) |
 | `scripts/stop.sh` | none | stops them |
 | `scripts/status.sh` | none | what is running, listening, registered; `-f` tails logs |
@@ -241,14 +254,27 @@ ND exports what the client believes is a raw disk, `/dev/ndp0`:
 
 ```
 block 0       a Sun disklabel, ignored by the PROM
-blocks 1-15   the first stage    payload/sun2-bootyy   (start.sh passes it)
-block 16 on   the second stage   tftpboot/C0A8007B.SUN2 (ndbootd -s finds it)
+blocks 1-15   the first stage    ndboot/C0A8007C.SUN2
+block 16 on   the second stage   tftpboot/C0A8007C.SUN2
 ```
 
-The second stage is found by the same hex-plus-suffix name a Sun-3 TFTPs by, so
-`03-configure.sh` generates it exactly as it does for the others, and
-`etc/ethers` is shared with `rarpd`. Both programs must be raw binaries with
-executable headers stripped, which is how NetBSD ships them.
+Both are found by the same hex-plus-suffix name a Sun-3 TFTPs by, so
+`03-configure.sh` generates them exactly as it does the others, and
+`etc/ethers` is shared with `rarpd`. Both must be raw binaries with executable
+headers stripped, which is how NetBSD ships them.
+
+Upstream `ndbootd` finds only the *second* stage that way; the first is one
+file for all clients, given on the command line. Two Sun-2s can need entirely
+different ones — NetBSD's `bootyy` reads block 16 onwards and stays on ND,
+SunOS's `sun2.bb` stops using ND after block 15 and finishes over RARP and
+TFTP — so `src/ndbootd-boot1-dir.patch` lets the trailing argument be a
+directory and looks the first stage up in it by the same per-client name. The
+open was already per-client; only the name was not. A plain filename still
+behaves exactly as before.
+
+That is why there are two directories rather than one: `tftpboot/C0A8007C.SUN2`
+is already taken by the second stage, and `atftpd` has no business serving
+first stages to anybody.
 
 `start.sh` runs `ndbootd` only when the table has a `sun2` in it, and treats
 every problem with it as a warning rather than an error, so a missing capability
@@ -263,14 +289,19 @@ source and destination addresses, broadcast — and reports the reply.
 needs no privilege at all:
 
 ```
-  PASS  ND read of block 1 answered
-          <- READ|WAIT|DONE from 192.168.0.31 to 192.168.0.123
-             512 bytes of data, first 16: 46fc270041fafffa43f900240000b3c8
-  PASS  ND read of block 16 answered
+  PASS  08:00:20:01:06:e0: ND read of block 1 answered
+  PASS  08:00:20:01:06:e0: block 1 is sunos-sun2.bb
+  PASS  08:00:20:01:06:e0: ND read of block 16 answered
+  PASS  08:00:20:01:06:e1: ND read of block 1 answered
+  PASS  08:00:20:01:06:e1: block 1 is netbsd2-bootyy
+  PASS  08:00:20:01:06:e1: ND read of block 16 answered
 ```
 
-`46fc 2700` is `move #$2700,sr` — the first instruction of a 68000 boot
-program, so that really is `bootyy` coming back.
+It asks as each Sun-2 in turn and compares the first sixteen bytes that come
+back with the first sixteen of that client's own `ndboot/` entry, which is the
+only way to see that they really did get different programs. `46fc 2700` is
+`move #$2700,sr`, the first instruction of a 68000 boot program, so what comes
+back is a boot program and not a disk label.
 
 ### The kernel, and the name it is asked for
 
@@ -323,35 +354,50 @@ it, never into it.
   RARP       not used                        sun2.bb asks, rarpd answers
   TFTP       not used                        C0A8007B.SUN2 = boot.sun2
   bootparams whoami + getfile root           same
-  NFS        version 3, unfs3                version 2, tools/nfs2d.py
+  NFS        version 2, tools/nfs2d.py       version 2, tools/nfs2d.py
   kernel     netbsd / vmunix                 vmunix
 ```
 
 Only the middle two lines are shared. NetBSD carries ND all the way to its
 second stage; SunOS drops ND after 15 blocks and finishes over RARP and TFTP,
 which is why `rarpd` matters for a Sun-2 running SunOS and not for one running
-NetBSD. `start.sh` picks `ndbootd`'s first stage from the payload word, and
-says which one it chose.
+NetBSD. `03-configure.sh` puts each machine's first stage in `ndboot/` under
+its own name, so the two can be powered on at the same time.
+
+Both end up on NFS version 2: every NetBSD bootstrap is version 2 only
+(`sys/lib/libsa/nfs.c` in 2.0 knows nothing else, and 10.1 tries version 3 and
+falls back), and so is every SunOS 4.x one. Version 3 only comes into it when
+a NetBSD *kernel* mounts its root; see "Which server answers MOUNT".
 
 ### tools/nfs2d.py, an unprivileged NFSv2 server
 
 SunOS 4.0.3 is from 1989. NFSv3 is from 1995. `boot.sun2` and the SunOS kernel
 speak NFS version 2, which unfs3 does not serve, and this host's kernel has no
 `CONFIG_NFSD_V2` (and would want root anyway). So `tools/nfs2d.py` serves NFS
-version 2 and MOUNT version 1, in about 800 lines of Python, as an ordinary
+version 2 and the MOUNT protocol, in about 950 lines of Python, as an ordinary
 user.
 
-It runs **alongside** unfs3 rather than instead of it. RPC programs register per
-version, so the two do not collide:
+It runs **alongside** unfs3 rather than instead of it -- RPC programs register
+per version, so the two do not collide -- until a client turns up whose kernel
+would pick the wrong one, at which point unfs3 stands down and nfs2d answers
+for everybody ("Which server answers MOUNT"). With only `netbsd` and `sunos`
+clients in the table it is the arrangement below:
 
 ```
 100003  3  udp  2050   nfs      unfs3     NetBSD clients
 100005  3  udp  2050   mountd   unfs3
 100003  2  udp  2049   nfs      nfs2d     SunOS clients
 100005  1  udp  2049   mountd   nfs2d
+100005  2  udp  2049   mountd   nfs2d
 ```
 
-Which of the two sits on 2049 is not a free choice; see the next section.
+MOUNT version 2 is version 1 plus a `PATHCONF` procedure (`MOUNTVERS_POSIX`),
+so answering both costs one line and nothing else. It is there because a
+NetBSD kernel walks the versions downwards and needs to find one; see "Which
+server answers MOUNT".
+
+Which of the two servers sits on 2049 is not a free choice; see the next
+section.
 
 Both Sun-3s and the Sun-2 can boot at the same time, each over the version it
 understands. `nfs2d` registers itself through the portmapper, so its port is
@@ -376,6 +422,7 @@ nothing because it looks up both mountd and nfs by program number:
 ```
 100003  2  udp  2049   nfs      nfs2d    SunOS -- assumes this port
 100005  1  udp  2049   mountd   nfs2d
+100005  2  udp  2049   mountd   nfs2d
 100003  3  udp  2050   nfs      unfs3    NetBSD -- asks the portmapper
 100005  3  udp  2050   mountd   unfs3
 ```
@@ -600,6 +647,157 @@ device nodes in `/dev` cannot be opened here by their host-side numbers. (Their
 `rdev` values are reported correctly: SunOS's `(major << 8) | minor` and Linux's
 encoding agree for every node in this tree.)
 
+## NetBSD 2.0 with a real root
+
+The other Sun-2 in the table boots NetBSD, and not the one the Sun-3s get:
+
+```sh
+sun2b	08:00:20:01:06:e1	192.168.0.124	sun2	netbsd2
+```
+
+NetBSD 10.1 still builds for sun2, and `netbsd-RAMDISK` boots on one, but its
+userland does not fit a machine with 4MB of RAM and a 68010. NetBSD 2.0 is the
+last release whose sun2 binaries are worth running on the hardware, and it is
+old enough to live in the archive rather than on the mirrors, so it gets its
+own release number and its own base URL:
+
+```sh
+NETBSD2_RELEASE=2.0
+NETBSD2_KERNEL_SUN2=netbsd-DISKLESS
+NETBSD2_SETS='base etc'
+```
+
+`DISKLESS` is the sun2 kernel built to mount its root over NFS. `RAMDISK` and
+`INSTALL` carry their own root and would ignore the tree entirely; `GENERIC`
+wants a local disk.
+
+Two steps, neither of them privileged:
+
+```sh
+scripts/02-fetch-payload.sh          # bootyy, netboot, the kernel, base+etc
+scripts/04-make-netbsd2-root.sh      # unpack them into nfsroot/sun2b
+```
+
+`archive.netbsd.org` puts a "trivial botcatcher" in front of the larger files —
+a form asking what you are here for, answered with a `key=` parameter — so the
+fetch says `NetBSD`, which is what it is here for. Everything is checked
+against the release's own `MD5` files; the sets stay in `dist/` rather than
+`payload/`, since `base.tgz` alone is 74MB and no PROM ever asks for it.
+
+The boot chain is the NetBSD one described under "A Sun-2", an older release of
+it: ND for `bootyy`, ND again for `netboot`, bootparams for `root`, then NFS
+version 2 all the way. What is new is the far end — 177MB of root filesystem
+instead of a single kernel.
+
+### /dev without mknod
+
+A root filesystem needs `/dev`, and `mknod(2)` is privileged. That is the
+reason `root/make-sunos-root.sh` exists and needs `sudo`. It is not the reason
+here.
+
+NetBSD's own `dev/MAKEDEV` has a `-s` flag, for building a `/dev` while
+cross-building as an ordinary user. It prints an `mtree(8)` specfile instead of
+calling `mknod`:
+
+```
+./console type=char device=netbsd,0,0 mode=600 gid=0 uid=0
+./sd0a type=block device=netbsd,7,0 mode=640 gid=5 uid=0
+```
+
+So `04-make-netbsd2-root.sh` keeps that file, puts an empty placeholder where
+each of the 855 nodes belongs, and `nfs2d --devices` reports the one as the
+other. Nothing is being faked that matters: a device node over NFS is a type
+and a pair of numbers, which the client's own kernel acts on. No client ever
+reads one — and `nfs2d` refuses to, since opening `/dev/console` on this side
+would open *this host's* device of those numbers.
+
+The numbers are NetBSD's, not Linux's. `sys/sys/types.h` puts twelve bits of
+major at bit 8 and splits the minor between bits 31-20 and 7-0; for everything
+in a Sun-2 `/dev` — major under 4096, minor under 256, the largest here being
+63 — that comes to `(major << 8) | minor`, which is also how SunOS and Linux
+spell it. `nfs2d` implements the full form anyway, so a large minor cannot
+quietly turn into a small one.
+
+Ownership is the same trick as the SunOS root: the tree comes out owned by
+whoever unpacked it, and `--squash-to-root` reports it as root-owned, which
+3295 of the 3330 files in `base.tgz` genuinely are. Device nodes are the
+exception — the specfile says who owns each one, and that is a real answer, so
+they are reported as themselves rather than squashed.
+
+`tools/nfs-probe.py --check-devices` reads the same specfile and asks the
+server about every node in it, comparing type, mode, uid, gid and rdev — the
+specfile being the authority, not `nfs2d`:
+
+```
+GETATTR            -> 855 device nodes match MAKEDEV.spec, and READ of one is refused
+```
+
+### Which server answers MOUNT
+
+A NetBSD 2.0 kernel does not simply ask for the NFS version it wants. From
+`sys/nfs/nfs_boot.c`:
+
+```c
+	mntver = (argp->flags & NFSMNT_NFSV3) ? 3 : 2;
+	do {
+		error = krpc_portmap(mdsin, RPCPROG_MNT, mntver, ...);
+		if (error) continue;
+		error = krpc_call(mdsin, RPCPROG_MNT, mntver, RPCMNT_MOUNT, &m, NULL);
+		if (error != EPROGMISMATCH) break;
+	} while (--mntver >= 1);
+```
+
+It starts at version 3 — `options NFS_V2_ONLY` is commented out in
+`sys/arch/sun2/conf/DISKLESS` — and walks downwards, but **only** on
+`EPROGMISMATCH`. A version nobody registered gets port 0 from the portmapper,
+a call to port 0 times out, and the boot ends there. So the fallback exists
+only if something answers version 3 and says it does not speak it.
+
+That matters because a `netbsd2` root cannot be served by unfs3 at all: its
+`/dev` is 855 empty files, and only `nfs2d` knows they are anything else. A
+client that reached it over NFSv3 would find an empty `/dev/console` and go no
+further.
+
+So when the table has a `netbsd2` client in it, `nfs2d` registers MOUNT
+versions 1, 2 **and** 3 — answering 3 with `PROG_MISMATCH`, which is the true
+answer and also the one that sends the kernel down to 2 — and `start.sh` does
+not start `unfsd`:
+
+```
+==> a netbsd2 client is configured, so nfs2d answers every MOUNT
+==>   version and unfsd would never be reached; not starting it.
+```
+
+Nothing is lost. Every NetBSD bootloader falls back by itself —
+`sys/lib/libsa/nfs.c` retries with `RPCMNT_VER1` on any failure of the version
+3 mount — so the Sun-3s carry on reading their kernels, over version 2 instead
+of version 3. `selftest.sh` walks the versions the way the kernel does and
+says where it lands:
+
+```
+MOUNT v3 on port 2049 -> PROG_MISMATCH, so a client falls back to v2
+MOUNT v2 on port 2049 -> filehandle, so the root is mounted over NFS version 2
+```
+
+Take the `netbsd2` line out of the table and `unfsd` comes back, on 2050, with
+version 3 as before.
+
+### What it is configured with
+
+`04-make-netbsd2-root.sh` touches four files in the unpacked tree, and says
+which:
+
+| file | why |
+|---|---|
+| `etc/rc.conf` | ships `rc_configured=NO`, which drops the boot to single user |
+| `etc/fstab` | `/etc/rc.d/root` runs `mount /`, which needs a `/` entry |
+| `etc/myname` | so the userland agrees with the name bootparams gave the kernel |
+| `etc/hosts` | there is no DNS out here; both ends are named by hand |
+
+Everything else is the release as shipped, including `root` with no password,
+which is how NetBSD 2.0 comes and what makes the first console login possible.
+`etc/ttys` already has a getty on `ttya`.
+
 ## What needs root, and why only that
 
 | daemon | needs | why |
@@ -700,8 +898,8 @@ Everything else is unchanged.
 
 `scripts/dryrun.sh` starts the whole stack inside an unprivileged user,
 mount, network and PID namespace, where ports 69 and 111 are free, and drives
-it with the same probes. It proves TFTP, the portmap/bootparams exchange and
-the NFSv3 mount before anyone is asked for root:
+it with the same probes. It proves TFTP, ND, the portmap/bootparams exchange
+and both NFS versions before anyone is asked for root:
 
 ```
   PASS  portmapper (100000) registered
@@ -710,9 +908,15 @@ the NFSv3 mount before anyone is asked for root:
   PASS  nfs (100003) registered
   PASS  C0A80079 served, 23316 bytes, matches the netboot image
   PASS  broadcast read request answered from a usable source address
+  PASS  08:00:20:01:06:e0: block 1 is sunos-sun2.bb
+  PASS  08:00:20:01:06:e1: block 1 is netbsd2-bootyy
   PASS  bootparamd answered
-  PASS  unfsd served the kernel
+  PASS  nfs2d served sun2b over NFSv2
 ```
+
+It builds `nfs2d`'s arguments with the same `nfs2d_args` in `scripts/common.sh`
+that `start.sh` uses, and stands `unfsd` down under the same rule, so what it
+rehearses is what will actually run.
 
 `scripts/selftest.sh` runs the same checks against the real daemons once they
 are up.
@@ -742,22 +946,43 @@ Set `PAYLOAD=custom` in the config and point `CUSTOM_NETBOOT` and
 `CUSTOM_KERNEL` at your own files. `02-fetch-payload.sh` then only checks they
 exist; everything downstream is unchanged.
 
-**unfs3 speaks NFSv3 only**, which is fine for NetBSD -- its bootloader tries
-MOUNT v3 first and only falls back to v1 (`sys/lib/libsa/nfs.c`). A **SunOS
-4.x** boot program speaks NFSv2 and nothing else, and this host's kernel is
-built with `CONFIG_NFSD_V2` unset, so neither unfs3 nor the in-kernel server
-can serve it. That gap is filled by `tools/nfs2d.py`; see "SunOS on the Sun-2".
+**unfs3 speaks NFSv3 only**, which is fine for a NetBSD bootloader -- it tries
+MOUNT v3 first and falls back to v1 (`sys/lib/libsa/nfs.c`). A **SunOS 4.x**
+boot program speaks NFSv2 and nothing else, and this host's kernel is built
+with `CONFIG_NFSD_V2` unset, so neither unfs3 nor the in-kernel server can
+serve it. That gap is filled by `tools/nfs2d.py`; see "SunOS on the Sun-2".
 
-## A real NFS root, later
+A NetBSD *kernel* mounting its root is a third case again: it starts at MOUNT
+version 3 and falls back only on `PROG_MISMATCH`. See "Which server answers
+MOUNT".
 
-Milestones 1 to 3 deliberately end at `netbsd-RAMDISK`, a kernel that carries
-its own root filesystem, so nothing has to solve the hard part yet.
+## A real NFS root
 
-A real NetBSD root needs device nodes in `/dev` and correct file ownership,
-and `unfsd` running as an ordinary user can neither `mknod` nor `chown`. When
-that becomes the goal it needs a decision that this setup has so far avoided:
-run `unfsd` as root, or prepare the root filesystem some other way. Worth
-deciding then, with the boot chain already proven.
+Milestones 1 to 3 deliberately ended at `netbsd-RAMDISK`, a kernel that carries
+its own root filesystem, so that nothing had to solve the hard part until the
+boot chain itself was proven.
+
+The hard part was that a real root needs device nodes in `/dev` and correct
+file ownership, and a server running as an ordinary user can neither `mknod`
+nor `chown` -- which looked like a choice between running the NFS server as
+root and giving up. It was neither. Ownership is reported rather than set
+(`--squash-to-root`), and `/dev` is described rather than created
+(`--devices`, from the specfile NetBSD's own `MAKEDEV -s` writes). Both are
+things an NFS server is entitled to decide, because both are answers it sends
+rather than state it holds.
+
+There are two real roots here now, and neither needs privilege at runtime:
+
+| | SunOS 4.0.3 | NetBSD 2.0 |
+|---|---|---|
+| unpacked by | `root/make-sunos-root.sh` | `scripts/04-make-netbsd2-root.sh` |
+| needs root | **yes**, once, for `mknod` | no |
+| `/dev` | 113 real device nodes | 855 placeholders + a specfile |
+| ownership | `chown`ed to us, squashed back | never `chown`ed, squashed |
+
+The SunOS one still needs root because its `/dev` comes out of a tar archive
+with the nodes already in it, and there is no specfile to describe them
+instead. See "A real SunOS root" and "NetBSD 2.0 with a real root".
 
 ## Layout
 
@@ -770,7 +995,8 @@ tools/      protocol probes (bp-probe.py, nfs-probe.py, tftp-bcast-probe.py,
             and sun3conf.py, which reads the client table for them
 sbin/       the daemons; four carry capabilities
 etc/        generated configuration
-tftpboot/   what the PROM downloads
+tftpboot/   what the PROM downloads over TFTP, and Sun-2 second stages
+ndboot/     Sun-2 first stages, one per client, over ND
 payload/    netboot and kernels as fetched
 nfsroot/    what the client mounts
 dist/ pkg/ src/   download cache, extracted .debs, local builds

@@ -1,0 +1,116 @@
+Give ndbootd a first-stage boot program per client.
+
+ndbootd already finds a client's *second*-stage program by turning its IP
+address into a filename in a directory -- C0A8007C.SUN2 -- exactly as a Sun-3
+PROM does when TFTPing.  The first stage, ND blocks 1-15, is one file for
+every client.
+
+Two Sun-2s can need entirely different first stages.  NetBSD's bootyy reads
+the second stage from block 16 onwards and stays on ND; SunOS's sun2.bb stops
+using ND after those 15 blocks and finishes over RARP and TFTP.  Serving one
+of them to a machine expecting the other gets nowhere.
+
+The open is already per-client -- ndbootd re-opens both programs whenever its
+client cache expires -- so this is only about the name.  The trailing argument
+may now be a directory, and then the first stage is looked up in it under the
+same per-client name the second stage uses.  A plain filename behaves exactly
+as before.
+
+--- ndbootd.c
++++ ndbootd.c
+@@ -331,7 +331,9 @@
+ 	int argv_i;
+ 	int show_usage;
+ 	const char *interface_name;
+-	const char *boot1_file_name;
++	const char *boot1_x_name;
++	char *boot1_file_name;
++	int boot1_x_name_is_dir;
+ 	const char *boot2_x_name;
+ 	char *boot2_file_name;
+ 	int boot2_x_name_is_dir;
+@@ -383,6 +385,7 @@
+ #ifdef _NDBOOTD_DO_DEBUG
+ 	_ndbootd_debug = FALSE;
+ #endif				/* _NDBOOTD_DO_DEBUG */
++	boot1_x_name = NULL;
+ 	boot1_file_name = NULL;
+ 	boot2_x_name = NULL;
+ 	interface_name = NULL;
+@@ -431,14 +434,16 @@
+ 		}
+ 	}
+ 	if (argv_i + 1 == argc) {
+-		boot1_file_name = argv[argv_i];
++		boot1_x_name = argv[argv_i];
+ 	} else {
+ 		show_usage = TRUE;
+ 	}
+ 
+ 	if (show_usage) {
+ 		fprintf(stderr, "\
+-usage: %s [OPTIONS] BOOT1-BIN\n\
++usage: %s [OPTIONS] { BOOT1-BIN | DIR }\n\
++where BOOT1-BIN is the first-stage boot program, or DIR a directory to\n\
++find one in, under the same per-client name as a second-stage program\n\
+ where OPTIONS are:\n\
+   -s, --boot2 { BOOT2-BIN | DIR }\n\
+                           find a second-stage boot program in the file\n\
+@@ -471,6 +476,23 @@
+ 			exit(1);
+ 		}
+ 	}
++	/* the same for the first-stage boot program.  Two Sun-2s can want
++	 * entirely different ones -- NetBSD's bootyy carries on over ND,
++	 * SunOS's sun2.bb stops and goes off to RARP and TFTP -- and one
++	 * server has to be able to give each machine its own: */
++	boot1_x_name_is_dir = FALSE;
++	if (stat(boot1_x_name, &stat_buffer) < 0) {
++		fprintf(stderr, "%s error: could not stat %s: %s\n",
++		    _ndbootd_argv0, boot1_x_name, strerror(errno));
++		exit(1);
++	}
++	if (S_ISDIR(stat_buffer.st_mode)) {
++		boot1_x_name_is_dir = TRUE;
++	} else if (!S_ISREG(stat_buffer.st_mode)) {
++		fprintf(stderr, "%s error: %s is neither a regular file nor a directory\n",
++		    _ndbootd_argv0, boot1_x_name);
++		exit(1);
++	}
+ 	/* find the interface we will use: */
+ 	if ((interface = _ndbootd_find_interface(interface_name)) == NULL) {
+ 		fprintf(stderr, "%s error: could not find the interface to use: %s\n",
+@@ -682,12 +704,33 @@
+ 			if (boot1_fd >= 0) {
+ 				close(boot1_fd);
+ 			}
++			if (boot1_file_name != NULL) {
++				free(boot1_file_name);
++				boot1_file_name = NULL;
++			}
+ 			if (boot2_file_name != NULL) {
+ 				free(boot2_file_name);
+ 			}
+ 			if (boot2_fd >= 0) {
+ 				close(boot2_fd);
+ 			}
++			/* determine what the name of the first-stage
++			 * boot program will be: */
++			if (boot1_x_name_is_dir) {
++				if ((boot1_file_name = malloc(strlen(boot1_x_name) + strlen("/00000000.SUN2") + 1)) != NULL) {
++					sprintf(boot1_file_name, "%s/%02X%02X%02X%02X.SUN2",
++					    boot1_x_name,
++					    ((unsigned char *) &last_client_ip)[0],
++					    ((unsigned char *) &last_client_ip)[1],
++					    ((unsigned char *) &last_client_ip)[2],
++					    ((unsigned char *) &last_client_ip)[3]);
++				}
++			} else {
++				boot1_file_name = strdup(boot1_x_name);
++			}
++			if (boot1_file_name == NULL) {
++				abort();
++			}
+ 			/* open the first-stage boot program: */
+ 			if ((boot1_fd = open(boot1_file_name, O_RDONLY)) < 0) {
+ 				_NDBOOTD_DEBUG((fp, "could not open %s: %s",

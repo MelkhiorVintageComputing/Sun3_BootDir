@@ -25,11 +25,23 @@ fi
 
 # Worked out here rather than inside the heredoc, where the quoting needed to
 # get an awk program through unscathed is not worth it.
-SUN2_MAC=$(clients | awk '$4 == "sun2" { print $2; exit }')
-case $(clients | awk '$4 == "sun2" { print $5; exit }') in
-sunos) SUN2_BOOT1=$BOOTDIR/payload/sunos-sun2.bb ;;
-*)     SUN2_BOOT1=$BOOTDIR/payload/sun2-bootyy ;;
-esac
+# ndbootd finds a first stage per client in ndboot/, under the same name it
+# finds the second stage by in tftpboot/ (src/ndbootd-boot1-dir.patch), so
+# that is the directory the real daemon is given and the one to rehearse --
+# with every sun2, since the point of it is that they differ.
+SUN2_CLIENTS=$(clients | while read -r n m i a p; do
+	[ "$a" = sun2 ] && printf '%s %s\n' "$m" "$(tftpname "$i" "$a")"
+done)
+# The NFSv2 server's arguments, and the client it is really for.  Worked out
+# by common.sh so that this rehearses exactly what start.sh runs.
+NFS2D_ARGS=$(nfs2d_args)
+# A netbsd2 client for preference: it is the one with a whole root filesystem
+# and a /dev to check, and the checks below are about its export.
+NFS2D_CLIENT=$(clients | awk '$5 == "netbsd2" { print $1; exit }')
+[ -n "$NFS2D_CLIENT" ] || NFS2D_CLIENT=$(clients | awk '$5 == "sunos" { print $1; exit }')
+NFS2D_FILE=$(clients | awk -v n="$NFS2D_CLIENT" '$1 == n { print ($4 == "sun2" ? "vmunix" : "netbsd") }')
+NFS2D_SPEC=$(clients | awk '$5 == "netbsd2" { print $1; exit }')
+NFS2D_EVERY=$(nfs2d_answers_every_version && echo yes || echo no)
 
 say "entering a private user+network namespace"
 # --pid --fork --kill-child means every daemon started inside dies with this
@@ -47,8 +59,16 @@ NAME='$(tftpname "$CLIENT_IP" "$CLIENT_ARCH")'
 CLIENT_IP='$CLIENT_IP'
 SERVER_IP='$SERVER_IP'
 UNFSD_PORT='$UNFSD_PORT'
-SUN2_MAC='$SUN2_MAC'
-SUN2_BOOT1='$SUN2_BOOT1'
+SUN2_CLIENTS='$SUN2_CLIENTS'
+NDBOOT='$NDBOOT'
+NFSROOT='$NFSROOT'
+NFS2D_PORT='$NFS2D_PORT'
+NFS2D_TSIZE='$NFS2D_TSIZE'
+NFS2D_ARGS='$NFS2D_ARGS'
+NFS2D_CLIENT='$NFS2D_CLIENT'
+NFS2D_FILE='$NFS2D_FILE'
+NFS2D_SPEC='$NFS2D_SPEC'
+NFS2D_EVERY='$NFS2D_EVERY'
 INNER_SCRIPT=1
 $(cat <<'SCRIPT'
 
@@ -80,7 +100,19 @@ echo
 echo 'starting daemons on a private loopback'
 start rpcbind    "$SBIN/rpcbind" -f -d -i || exit 1
 start bootparamd "$SBIN/rpc.bootparamd" -d -r "$SERVER_IP" -f "$ETC/bootparams" || exit 1
-start unfsd      "$SBIN/unfsd" -d -s -e "$ETC/exports" -n "$UNFSD_PORT" -m "$UNFSD_PORT" || exit 1
+# nfs2d before unfsd: the portmapper keeps the first registration it is given
+# for a program and version, and nfs2d is the one that has to have the low
+# MOUNT versions.  Same reason start.sh stands unfsd down entirely when nfs2d
+# is answering all of them.
+# shellcheck disable=SC2086
+[ -z "$NFS2D_CLIENT" ] || start nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
+	--root "$NFSROOT" --port "$NFS2D_PORT" --tsize "$NFS2D_TSIZE" \
+	--debug $NFS2D_ARGS || exit 1
+if [ "$NFS2D_EVERY" = yes ]; then
+	echo '  SKIP  unfsd -- nfs2d answers every MOUNT version, as in start.sh'
+else
+	start unfsd "$SBIN/unfsd" -d -s -e "$ETC/exports" -n "$UNFSD_PORT" -m "$UNFSD_PORT" || exit 1
+fi
 # --user/--group are only needed here: inside the namespace our uid maps to 0,
 # so atftpd thinks it is root and insists on dropping privileges to a user that
 # does not exist in the map.  Outside, it sees a plain uid and skips all of
@@ -125,12 +157,10 @@ fi
 
 echo
 echo 'ND (Sun-2) over a veth pair'
-if [ -z "$SUN2_MAC" ]; then
+if [ -z "$SUN2_CLIENTS" ]; then
 	echo '  SKIP  no sun2 client configured'
 elif [ ! -x "$SBIN/ndbootd" ]; then
 	no 'sbin/ndbootd missing -- run scripts/01-build-ndbootd.sh'
-elif [ ! -f "$SUN2_BOOT1" ]; then
-	no "$SUN2_BOOT1 missing -- run scripts/02-fetch-payload.sh"
 else
 	# A veth pair is the whole point here: ndbootd needs a real interface
 	# to open an AF_PACKET socket on, and inside this namespace we can make
@@ -139,21 +169,40 @@ else
 	ip link add nd0 type veth peer name nd1 \
 		&& ip addr add "$SERVER_IP/24" dev nd0 \
 		&& ip link set nd0 up && ip link set nd1 up
-	start ndbootd "$SBIN/ndbootd" -d -i nd0 -s "$TFTPBOOT" "$SUN2_BOOT1" || exit 1
+	start ndbootd "$SBIN/ndbootd" -d -i nd0 -s "$TFTPBOOT" "$NDBOOT" || exit 1
 	# Block 0 is the label; blocks 1-15 are the first stage, and block 16
 	# onwards is the second stage ndbootd finds by hex name in tftpboot.
-	echo "        first stage: ${SUN2_BOOT1##*/}"
-	for blk in 1 16; do
-		if out=$(python3 "$BOOTDIR/tools/nd-probe.py" --interface nd1 \
-				--client-mac "$SUN2_MAC" --block "$blk" 2>&1); then
-			ok "ND read of block $blk answered"
-			printf '%s\n' "$out" | sed 's/^/        /'
-		else
-			no "ND read of block $blk failed:"
-			printf '%s\n' "$out" | sed 's/^/        /'
-			sed 's/^/        /' "$LOG/dryrun-ndbootd.log"
+	# Ask as each Sun-2 in turn and check block 1 really is that machine's
+	# own first stage: a SunOS one handed NetBSD's bootyy gets nowhere.
+	while read -r mac hexname; do
+		[ -n "$mac" ] || continue
+		if [ ! -e "$NDBOOT/$hexname" ]; then
+			no "ndboot/$hexname missing -- run scripts/03-configure.sh"
+			continue
 		fi
-	done
+		want=$(od -An -tx1 -N16 "$NDBOOT/$hexname" | tr -d ' \n')
+		for blk in 1 16; do
+			if out=$(python3 "$BOOTDIR/tools/nd-probe.py" --interface nd1 \
+					--client-mac "$mac" --block "$blk" 2>&1); then
+				ok "$mac: ND read of block $blk answered"
+			else
+				no "$mac: ND read of block $blk failed:"
+				printf '%s\n' "$out" | sed 's/^/        /'
+				sed 's/^/        /' "$LOG/dryrun-ndbootd.log"
+				continue
+			fi
+			[ "$blk" = 1 ] || continue
+			got=${out##*first 16: }
+			got=${got%%[!0-9a-f]*}
+			if [ "$got" = "$want" ]; then
+				ok "$mac: block 1 is $(readlink -f "$NDBOOT/$hexname" | sed 's|.*/||')"
+			else
+				no "$mac: block 1 starts $got, ndboot/$hexname starts $want"
+			fi
+		done
+	done <<CLIENTS
+$SUN2_CLIENTS
+CLIENTS
 fi
 
 echo
@@ -169,7 +218,9 @@ fi
 
 echo
 echo 'NFSv3 mount, lookup and read of the kernel'
-if out=$(python3 "$BOOTDIR/tools/nfs-probe.py" --server 127.0.0.1 2>&1); then
+if [ "$NFS2D_EVERY" = yes ]; then
+	echo '  SKIP  unfsd is not running; the NFSv2 check below is what replaces it'
+elif out=$(python3 "$BOOTDIR/tools/nfs-probe.py" --server 127.0.0.1 2>&1); then
 	ok 'unfsd served the kernel'
 	printf '%s\n' "$out" | sed 's/^/        /'
 else
@@ -179,8 +230,29 @@ else
 fi
 
 echo
+echo 'NFSv2: what a SunOS or old-NetBSD client gets instead'
+if [ -z "$NFS2D_CLIENT" ]; then
+	echo '  SKIP  no sunos or netbsd2 client configured'
+else
+	set -- --server 127.0.0.1 --client "$NFS2D_CLIENT" --file "$NFS2D_FILE" \
+		--nfs-version 2
+	[ -z "$NFS2D_SPEC" ] || set -- "$@" \
+		--check-devices "$NFSROOT/$NFS2D_SPEC/dev/MAKEDEV.spec" \
+		--check-mount-fallback
+	if out=$(python3 "$BOOTDIR/tools/nfs-probe.py" "$@" 2>&1); then
+		ok "nfs2d served $NFS2D_CLIENT over NFSv2"
+		printf '%s\n' "$out" | sed 's/^/        /'
+	else
+		no 'NFSv2 probe failed'
+		printf '%s\n' "$out" | sed 's/^/        /'
+		sed 's/^/        /' "$LOG/dryrun-nfs2d.log"
+	fi
+fi
+
+echo
 if [ "$fail" -eq 0 ]; then
-	echo 'Dry run passed: TFTP, ND, portmap+bootparams and NFSv3 all behave.'
+	echo 'Dry run passed: TFTP, ND, portmap+bootparams and both NFS versions
+all behave.'
 	echo 'What is left to prove on the real network is RARP, and that these'
 	echo 'same daemons can bind ports 69 and 111 outside the namespace --'
 	echo 'i.e. root/grant-privileges.sh.'

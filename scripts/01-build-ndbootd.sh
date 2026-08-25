@@ -5,7 +5,8 @@
 # learns its own IP address from the first ND reply.  ndbootd is NetBSD's
 # server for that, and it is not packaged for Debian, so we build it here --
 # with src/ndbootd-packet.c, an AF_PACKET replacement for its BPF-only raw
-# interface.  See README, "A Sun-2".
+# interface, and src/ndbootd-boot1-dir.patch, which lets each client have its
+# own first-stage boot program.  See README, "A Sun-2".
 #
 # Nothing here needs privilege.  The finished binary needs cap_net_raw, which
 # root/grant-privileges.sh grants.
@@ -49,9 +50,11 @@ say "checksums match"
 cp "$BOOTDIR/src/ndbootd-config.h"  "$SRC/config.h"
 cp "$BOOTDIR/src/ndbootd-packet.c"  "$SRC/ndbootd-packet.c"
 
-say "applying src/ndbootd-linux.patch"
-( cd "$SRC" && patch -p0 --forward --silent < "$BOOTDIR/src/ndbootd-linux.patch" ) \
-	|| die "the Linux patch did not apply"
+for p in ndbootd-linux ndbootd-boot1-dir; do
+	say "applying src/$p.patch"
+	( cd "$SRC" && patch -p0 --forward --silent < "$BOOTDIR/src/$p.patch" ) \
+		|| die "src/$p.patch did not apply"
+done
 
 # -D__RCSID: ndbootd.c uses it before it includes config.h, so it cannot be
 #            dealt with in the patch without touching that line too.
