@@ -930,6 +930,47 @@ Sun-3 boots.
 Each daemon logs to `log/<name>.log`, and `scripts/status.sh -f` tails them
 together — useful next to a serial console.
 
+`nfs2d` stamps every line to the millisecond, which is not decoration: a
+client retrying a `READ` whose answer never arrived looks exactly like a client
+reading the same block twice, and only the gap between the two lines says which
+it was.
+
+```
+2026-08-25 14:37:41.831 serving /…/nfsroot over NFSv2 on udp/2049, advertising tsize 1024
+2026-08-25 14:37:44.402 192.168.0.124 LOOKUP vmunix in sun2b -> OK
+```
+
+### Rotating nfs2d's log
+
+A boot writes thousands of lines and the file is never truncated, so rotate it
+with `SIGHUP`:
+
+```sh
+mv log/nfs2d.log log/nfs2d.log.1
+kill -HUP "$(cat run/nfs2d.pid)"
+```
+
+The daemon holds a descriptor, not a name, so without the signal it goes on
+writing into the renamed file for ever. `start.sh` redirects its output, which
+means `nfs2d` is never told where it is writing — so it reads the name once at
+startup from `/proc/self/fd/2`, remembers it, and reopens *that* on `SIGHUP`.
+Reading it again at rotation time would answer with the rotated name, which is
+exactly the file not to go back to. It says which file it is holding when it
+starts:
+
+```
+2026-08-25 14:37:41.827 logging to /…/log/nfs2d.log; SIGHUP reopens it
+```
+
+That line is also the check: if it is missing, stderr was not a file (a
+terminal, or a pipe) and no handler was installed, so `SIGHUP` stays ignored
+rather than becoming fatal — `start.sh` runs every daemon under `nohup`.
+`logrotate` therefore needs no `copytruncate` here, and loses nothing.
+`scripts/dryrun.sh` rehearses the rename-and-signal on its own copy.
+
+The other daemons are not ours and have no such handler; for those,
+`copytruncate` (or a restart) is the only option.
+
 `log/rpcbind.log` always contains
 
 ```

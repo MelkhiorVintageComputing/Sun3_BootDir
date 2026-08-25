@@ -87,6 +87,7 @@ start() {  # start <name> <command...>
 	name=$1; shift
 	"$@" >"$LOG/dryrun-$name.log" 2>&1 &
 	PIDS="$PIDS $!"
+	LAST_PID=$!
 	sleep 1
 	kill -0 $! 2>/dev/null || {
 		no "$name failed to start:"
@@ -104,10 +105,14 @@ start bootparamd "$SBIN/rpc.bootparamd" -d -r "$SERVER_IP" -f "$ETC/bootparams" 
 # for a program and version, and nfs2d is the one that has to have the low
 # MOUNT versions.  Same reason start.sh stands unfsd down entirely when nfs2d
 # is answering all of them.
-# shellcheck disable=SC2086
-[ -z "$NFS2D_CLIENT" ] || start nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
-	--root "$NFSROOT" --port "$NFS2D_PORT" --tsize "$NFS2D_TSIZE" \
-	--debug $NFS2D_ARGS || exit 1
+NFS2D_PID=
+if [ -n "$NFS2D_CLIENT" ]; then
+	# shellcheck disable=SC2086
+	start nfs2d python3 "$BOOTDIR/tools/nfs2d.py" \
+		--root "$NFSROOT" --port "$NFS2D_PORT" --tsize "$NFS2D_TSIZE" \
+		--debug $NFS2D_ARGS || exit 1
+	NFS2D_PID=$LAST_PID
+fi
 if [ "$NFS2D_EVERY" = yes ]; then
 	echo '  SKIP  unfsd -- nfs2d answers every MOUNT version, as in start.sh'
 else
@@ -247,6 +252,32 @@ else
 		printf '%s\n' "$out" | sed 's/^/        /'
 		sed 's/^/        /' "$LOG/dryrun-nfs2d.log"
 	fi
+fi
+
+echo
+echo 'log rotation: rename the log, SIGHUP, and keep writing'
+if [ -z "$NFS2D_PID" ]; then
+	echo '  SKIP  nfs2d not running'
+else
+	# The daemon holds a descriptor, not a name, so a renamed log goes on
+	# being written to until it is told to look at the name again.  This is
+	# the whole of what logrotate needs, without copytruncate.
+	mv "$LOG/dryrun-nfs2d.log" "$LOG/dryrun-nfs2d.log.rotated"
+	kill -HUP "$NFS2D_PID"
+	sleep 1
+	if [ ! -f "$LOG/dryrun-nfs2d.log" ]; then
+		no 'SIGHUP did not reopen the log; nothing was created'
+	elif grep -q 'on SIGHUP' "$LOG/dryrun-nfs2d.log"; then
+		ok 'SIGHUP reopened the log at its own name'
+		sed 's/^/        /' "$LOG/dryrun-nfs2d.log"
+	else
+		no 'a new log appeared but nfs2d did not say it reopened one:'
+		sed 's/^/        /' "$LOG/dryrun-nfs2d.log"
+	fi
+	# Put the whole trace back where a reader would look for it.
+	cat "$LOG/dryrun-nfs2d.log" >>"$LOG/dryrun-nfs2d.log.rotated"
+	mv "$LOG/dryrun-nfs2d.log.rotated" "$LOG/dryrun-nfs2d.log"
+	kill -HUP "$NFS2D_PID"
 fi
 
 echo

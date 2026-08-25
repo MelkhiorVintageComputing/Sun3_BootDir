@@ -30,12 +30,20 @@ needs.
 Runs as an ordinary user.  Nothing here needs a privileged port: the client
 finds us through the portmapper.
 
+Every line it writes is stamped to the millisecond, because a client retrying
+a READ whose answer never arrived looks exactly like a client reading the same
+block twice, and only the gap between the two lines says which.  To rotate the
+log, rename it and send SIGHUP: this process is never told where its output is
+going -- start.sh redirects it -- so it reads the name once from /proc at
+startup and reopens that.
+
     nfs2d.py --root DIR [--port N] [--allow IP,IP] [--no-register] [--debug]
 """
 
 import argparse
 import errno
 import os
+import signal
 import socket
 import stat
 import struct
@@ -119,6 +127,59 @@ ERRNO_TO_NFS = {
     errno.ENAMETOOLONG: NFSERR_NAMETOOLONG,
     errno.ENOTEMPTY: NFSERR_NOTEMPTY,
 }
+
+
+def stamp():
+    """Wall-clock time, to the millisecond.
+
+    Milliseconds because what this log is usually read for is timing: a client
+    retrying a READ whose answer never arrived looks exactly like a client
+    reading the same block twice, and only the gap between the two lines says
+    which of them it was.
+    """
+    now = time.time()
+    return (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+            + ".%03d" % (now % 1 * 1000))
+
+
+def note(*a):
+    """Every line this server writes goes through here: stamped, on stderr,
+    and flushed, so that a log which stops tells you when it stopped."""
+    print(stamp(), *a, file=sys.stderr, flush=True)
+
+
+def logfile():
+    """The path stderr is pointed at, if it is pointed at a file at all.
+
+    scripts/start.sh redirects it, so this process is never told the name.
+    /proc will say it once, at startup.  Asking again after a rotation would
+    answer with the *rotated* name, which is precisely the file not to go back
+    to, so the answer is remembered rather than looked up when needed.
+    """
+    try:
+        if not stat.S_ISREG(os.fstat(2).st_mode):
+            return None
+        path = os.readlink("/proc/self/fd/2")
+    except OSError:
+        return None
+    # Linux marks an unlinked target; the name is still where to reopen.
+    suffix = " (deleted)"
+    return path[:-len(suffix)] if path.endswith(suffix) else path
+
+
+def reopen_log(path):
+    """Point stderr back at path, whatever is there now.
+
+    This is the whole of what a rotation needs from us: the log is renamed out
+    from under the daemon, which goes on writing into the renamed inode until
+    it is told to look at the name again.  dup2 onto descriptor 2 rather than
+    replacing sys.stderr, so that every reference to it follows -- ours, and
+    anything the interpreter writes there on its own account.
+    """
+    sys.stderr.flush()
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    os.dup2(fd, 2)
+    os.close(fd)
 
 
 def pack_string(b):
@@ -404,7 +465,7 @@ class Server:
 
     def log(self, *a):
         if self.debug:
-            print(*a, file=sys.stderr, flush=True)
+            note(*a)
 
     def is_writable(self, path):
         real = os.path.realpath(path)
@@ -916,19 +977,31 @@ def main():
     server = Server(export, args.port, allow, args.debug, args.writable,
                     args.writable_tree, args.squash_to_root, args.tsize,
                     devices)
+    # Rotation.  Rename the log aside and send SIGHUP; without this the daemon
+    # writes into the renamed file for ever, since it holds the descriptor and
+    # never looks at the name again.  start.sh runs us under nohup, which
+    # leaves SIGHUP ignored -- installing a handler overrides that, and is in
+    # any case better than being killed by a stray one.
+    log_path = logfile()
+    if log_path is not None:
+        def rotate(_signum, _frame):
+            reopen_log(log_path)
+            note(f"reopened {log_path} on SIGHUP")
+        signal.signal(signal.SIGHUP, rotate)
+        note(f"logging to {log_path}; SIGHUP reopens it")
+
     for spec in args.devices:
-        print(f"device nodes: {spec}", file=sys.stderr)
+        note(f"device nodes: {spec}")
     if devices:
         missing = [d for d in devices if not os.path.exists(d)]
-        print(f"{len(devices)} device nodes reported from specfiles"
-              + (f", {len(missing)} with no placeholder file" if missing else ""),
-              file=sys.stderr)
+        note(f"{len(devices)} device nodes reported from specfiles"
+             + (f", {len(missing)} with no placeholder file" if missing else ""))
     for w in sorted(server.writable):
-        print(f"writable file: {w}", file=sys.stderr)
+        note(f"writable file: {w}")
     for t in server.writable_trees:
-        print(f"writable tree: {t}", file=sys.stderr)
+        note(f"writable tree: {t}")
     if server.squash:
-        print("reporting every file as owned by root", file=sys.stderr)
+        note("reporting every file as owned by root")
 
     registered = [(NFSPROG, NFSVERS, "nfs v2")]
     registered += [(MOUNTPROG, v,
@@ -939,10 +1012,10 @@ def main():
             portmap(PMAPPROC_UNSET, prog, vers, 0)
             if not portmap(PMAPPROC_SET, prog, vers, args.port):
                 raise SystemExit(f"the portmapper would not register {what}")
-            print(f"registered {what} on udp/{args.port}", file=sys.stderr)
+            note(f"registered {what} on udp/{args.port}")
 
-    print(f"serving {root} over NFSv2 on udp/{args.port}, "
-          f"advertising tsize {args.tsize}", file=sys.stderr, flush=True)
+    note(f"serving {root} over NFSv2 on udp/{args.port}, "
+         f"advertising tsize {args.tsize}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
