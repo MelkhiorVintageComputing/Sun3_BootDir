@@ -247,7 +247,8 @@ else
 			elif python3 "$BOOTDIR/tools/nfs-probe.py" --client "$n" --file "$want" \
 					--nfs-version 2 --expect-writable .profile \
 					--check-devices "$NFSROOT/$n/dev/MAKEDEV.spec" \
-					--check-rename --check-mount-fallback \
+					--check-setattr --check-rename \
+					--check-mount-fallback \
 					>"$LOG/nfs-probe-$n-root.out" 2>&1; then
 				ok "$n: root writable and renamable, /dev matches its specfile, MOUNT ends at v2"
 			else

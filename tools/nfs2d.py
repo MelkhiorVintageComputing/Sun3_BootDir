@@ -393,6 +393,9 @@ def load_devices(specfiles):
     kinds = {"char": stat.S_IFCHR, "block": stat.S_IFBLK}
     devices = {}
     for spec in specfiles:
+        if not os.path.exists(spec):
+            raise SystemExit(f"--devices {spec}: no such file.  A NetBSD root "
+                             f"gets one from scripts/04-make-netbsd2-root.sh")
         base = os.path.dirname(os.path.realpath(spec))
         with open(spec) as fh:
             for line in fh:
@@ -414,6 +417,24 @@ def load_devices(specfiles):
                     int(kw.get("uid", 0)), int(kw.get("gid", 0)),
                     netbsd_makedev(major, minor))
     return devices
+
+
+def chmodnofollow(path, mode):
+    """chmod(2), but never through a symlink.
+
+    Linux has no AT_SYMLINK_NOFOLLOW for chmod, so this is the usual way round
+    it: O_PATH|O_NOFOLLOW takes a descriptor for the object itself, and naming
+    that descriptor again through /proc gives a chmod with nothing left to
+    follow.  On a symlink the kernel refuses outright (EOPNOTSUPP), which is
+    the right answer -- a symlink's own mode means nothing -- and, unlike
+    opening the file for reading, it works on a file whose mode currently
+    allows nobody anything.
+    """
+    fd = os.open(path, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        os.chmod(f"/proc/self/fd/{fd}", mode)
+    finally:
+        os.close(fd)
 
 
 def nfs_type(mode):
@@ -740,25 +761,60 @@ class Server:
                 return err(NFSERR_ROFS, f" {self.shortname(path)}")
             # sattr: mode, uid, gid, size, atime{sec,usec}, mtime{sec,usec}.
             # 0xFFFFFFFF means "leave alone", which is how a client asks to
-            # change one field without knowing the others.
+            # change one field without knowing the others.  Any number of them
+            # can be set at once, so each is considered on its own.
             mode, uid, gid, size = d.u32(), d.u32(), d.u32(), d.u32()
+            atime, _ = d.u32(), d.u32()
+            mtime, _ = d.u32(), d.u32()
+            NONE = 0xFFFFFFFF
+            done, ignored = [], []
             try:
-                if size != 0xFFFFFFFF and stat.S_ISREG(self.lstat(path).st_mode):
-                    with opennofollow(path, "r+b") as fh:
-                        fh.truncate(size)
-                    self.log(f"{who} SETATTR {self.shortname(path)} size={size} -> OK")
-                elif size != 0xFFFFFFFF:
-                    self.log(f"{who} SETATTR {self.shortname(path)} "
-                             f"(size ignored: not a regular file) -> OK")
-                else:
-                    # mode, uid and gid we cannot honour as an ordinary user,
-                    # and a swap file does not care.  Report success with the
-                    # attributes unchanged rather than failing the boot.
-                    self.log(f"{who} SETATTR {self.shortname(path)} "
-                             f"(mode/uid/gid ignored) -> OK")
                 st = self.lstat(path)
+                spec = getattr(st, "from_spec", False)
+
+                if mode != NONE:
+                    # This one an ordinary user can do, on a file it owns, and
+                    # it matters: a compiler that cannot mark its output
+                    # executable has not finished the job.
+                    if spec:
+                        ignored.append("mode: the device specfile owns it")
+                    elif stat.S_ISLNK(st.st_mode):
+                        ignored.append("mode: on a symlink")
+                    else:
+                        chmodnofollow(path, mode & 0o7777)
+                        done.append(f"mode={mode & 0o7777:04o}")
+
+                if size != NONE:
+                    if stat.S_ISREG(st.st_mode) and not spec:
+                        with opennofollow(path, "r+b") as fh:
+                            fh.truncate(size)
+                        done.append(f"size={size}")
+                    else:
+                        ignored.append("size: not a regular file")
+
+                if mtime != NONE:
+                    # make(1) is a chain of mtime comparisons, and cp -p, tar
+                    # and install all set it.  utime is the owner's to call.
+                    when = (atime if atime != NONE else mtime, mtime)
+                    os.utime(path, when, follow_symlinks=False)
+                    done.append(f"mtime={mtime}")
+
+                if uid != NONE or gid != NONE:
+                    # The one thing genuinely out of reach: chown needs root,
+                    # and not being root is the point of this server.  With
+                    # --squash-to-root the client is told root owns everything
+                    # anyway, which is the answer it was asking for.
+                    ignored.append("uid/gid: chown needs root")
+
+                st = self.lstat(path)
+            except FileNotFoundError:
+                return err(NFSERR_STALE, f" {self.shortname(path)}")
             except OSError as exc:
-                return err(errno_to_nfs(exc))
+                return err(errno_to_nfs(exc), f" {self.shortname(path)}")
+            self.log(f"{who} SETATTR {self.shortname(path)}"
+                     + ("".join(f" {w}" for w in done) or " (nothing asked)")
+                     + (f" [{'; '.join(ignored)}]" if ignored else "")
+                     + " -> OK")
             return self.accepted(xid, SUCCESS,
                                  struct.pack("!I", NFS_OK) + self.attrs(st))
 

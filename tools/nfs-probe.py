@@ -194,6 +194,9 @@ def probe_v2(sock, args, export):
     if args.check_devices:
         if not check_devices(sock, args, fh, nport, args.check_devices, export):
             return 1
+    if args.check_setattr:
+        if not check_setattr(sock, args, fh, nport):
+            return 1
     if args.check_rename:
         if not check_rename(sock, args, fh, nport):
             return 1
@@ -208,7 +211,9 @@ def probe_v2(sock, args, export):
 
 NFSPROC2_WRITE = 8
 NFSPROC2_READLINK = 5
+NFSPROC2_SETATTR, NFSPROC2_GETATTR = 2, 1
 NFSPROC2_CREATE, NFSPROC2_REMOVE, NFSPROC2_RENAME = 9, 10, 11
+NOSET = 0xFFFFFFFF                                # sattr: "leave this alone"
 NFSERR_ROFS = 30
 NFSERR_IO = 5
 NFSERR_STALE = 70
@@ -264,6 +269,74 @@ def v2_read(sock, args, fh, nport, count):
         return None
     d.off += 68
     return d.opaque()
+
+
+def v2_getattr(sock, args, fh, nport):
+    """The seventeen words of struct fattr, or None."""
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_GETATTR, fh)
+    d = Decoder(reply)
+    if d.u32() != 0:
+        return None
+    return struct.unpack("!17I", reply[d.off:d.off + 68])
+
+
+def v2_setattr(sock, args, fh, nport, mode=NOSET, uid=NOSET, gid=NOSET,
+               size=NOSET, atime=NOSET, mtime=NOSET):
+    sattr = struct.pack("!8I", mode, uid, gid, size, atime, NOSET, mtime, NOSET)
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_SETATTR, fh + sattr)
+    d = Decoder(reply)
+    status = d.u32()
+    if status != 0:
+        return status, None
+    return 0, struct.unpack("!17I", reply[d.off:d.off + 68])
+
+
+def check_setattr(sock, args, dirfh, nport):
+    """Does SETATTR change what it can, and say so?
+
+    A compiler that cannot mark its output executable has not finished the
+    job, and make(1) is a chain of mtime comparisons, so both have to work.
+    chown does not and cannot -- it needs root, and not being root is the
+    point of this server -- so it is not checked here.
+
+    The reply to SETATTR carries the new attributes; they are checked there
+    *and* read back with a separate GETATTR, since a server that answered from
+    what it was asked rather than from the file would pass the first.
+    """
+    name = "nfs2d-setattr-probe"
+    if v2_lookup(sock, args, dirfh, nport, name) is not None:
+        v2_remove(sock, args, dirfh, nport, name)
+    fh = v2_create(sock, args, dirfh, nport, name)
+    if fh is None:
+        print(f"\nCREATE {name} failed, so there is nothing to set")
+        return False
+
+    ok = True
+    for what, kwargs, index, want in (
+            ("mode", {"mode": 0o755}, 1, 0o755),
+            ("mtime", {"mtime": 1000000000}, 13, 1000000000)):
+        status, fa = v2_setattr(sock, args, fh, nport, **kwargs)
+        if status != 0:
+            print(f"\nSETATTR {what} -> NFSv2 error {status}")
+            ok = False
+            break
+        got = fa[index] & (0o7777 if what == "mode" else 0xFFFFFFFF)
+        back = v2_getattr(sock, args, fh, nport)
+        again = back[index] & (0o7777 if what == "mode" else 0xFFFFFFFF)
+        if got != want or again != want:
+            fmt = (lambda v: f"{v:04o}") if what == "mode" else str
+            print(f"\nSETATTR {what}={fmt(want)}: the reply said {fmt(got)} "
+                  f"and a later GETATTR said {fmt(again)}")
+            ok = False
+            break
+        print(f"SETATTR {what:<6}     -> "
+              + (f"{want:04o}, and it reads back" if what == "mode"
+                 else f"{want}, and it reads back"))
+
+    v2_remove(sock, args, dirfh, nport, name)
+    return ok
 
 
 def check_rename(sock, args, dirfh, nport):
@@ -594,6 +667,10 @@ def main():
     ap.add_argument("--mount-port", type=int, default=None,
                     help="send MOUNT here instead of asking the portmapper, "
                          "for an unregistered server (NFSv2 only)")
+    ap.add_argument("--check-setattr", action="store_true",
+                    help="check that SETATTR really changes mode and mtime, "
+                         "in the reply and on a later GETATTR (NFSv2, "
+                         "writable export)")
     ap.add_argument("--check-rename", action="store_true",
                     help="check that a file handle survives the file being "
                          "renamed, and that one whose file is gone answers "

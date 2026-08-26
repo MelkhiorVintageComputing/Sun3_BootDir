@@ -403,6 +403,50 @@ Both Sun-3s and the Sun-2 can boot at the same time, each over the version it
 understands. `nfs2d` registers itself through the portmapper, so its port is
 not something a client has to be told.
 
+### What SETATTR can and cannot do
+
+`SETATTR` carries five things a client may want changed, and an unprivileged
+server is only barred from one of them:
+
+| | |
+|---|---|
+| `mode` | applied. A compiler that cannot mark its output executable has not finished the job |
+| `size` | applied, on a regular file: this is how a truncate crosses the wire |
+| `mtime` | applied. `make` is a chain of mtime comparisons, and `cp -p`, `tar` and `install` all set it |
+| `uid`/`gid` | **ignored**. `chown` needs root, and not being root is the point |
+
+Any number of them can arrive in one call — `0xFFFFFFFF` in a field means
+"leave this alone" — so each is considered on its own rather than in an
+if/else chain, which is what an earlier version got wrong: a `SETATTR` that
+set both a size and a mode applied only the size, and one that set a mode
+alone was logged as `(mode/uid/gid ignored)` and did nothing at all.
+
+Ignoring `uid`/`gid` costs nothing here, because `--squash-to-root` already
+tells the client that root owns everything. A `chown` to root is what a
+`tar x` or an `install` was asking for, and it is what the client sees.
+
+Two things are deliberately left alone rather than changed:
+
+* **A symlink's mode**, which means nothing in POSIX. `chmod(2)` has no
+  `AT_SYMLINK_NOFOLLOW` on Linux, so the usual way round it is
+  `O_PATH|O_NOFOLLOW` and then a `chmod` of `/proc/self/fd/N`, which the
+  kernel refuses outright on a symlink (`EOPNOTSUPP`). That is the right
+  answer and it also cannot reach the target — which matters, since a client
+  can create a symlink pointing anywhere it likes.
+* **A device node's mode**, which the specfile owns: there is nothing on disk
+  but a placeholder, and the client is told what `dev/MAKEDEV.spec` says.
+
+The log names what happened either way:
+
+```
+SETATTR tmp/dhry mode=0755 -> OK
+SETATTR box/dev/console (nothing asked) [mode: the device specfile owns it] -> OK
+```
+
+`nfs-probe.py --check-setattr` sets a mode and an mtime and checks both in the
+reply *and* in a later `GETATTR` — a server that answered from what it was
+asked rather than from the file would pass the first.
+
 ### A handle names a file, not a name
 
 A real NFS server derives a file handle from the inode, so a rename does not
