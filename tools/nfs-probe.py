@@ -200,6 +200,10 @@ def probe_v2(sock, args, export):
     if args.check_rename:
         if not check_rename(sock, args, fh, nport):
             return 1
+    if args.check_create_device:
+        if not check_create_device(sock, args, fh, nport,
+                                   args.check_create_device):
+            return 1
     if args.check_mount_fallback:
         if not check_mount_fallback(sock, args, export):
             return 1
@@ -462,6 +466,55 @@ def check_writability(sock, args, dirfh, nport):
     return True
 
 
+def check_create_device(sock, args, dirfh, nport, relpath):
+    """Does CREATE on a name that is already a device leave the device alone?
+
+    NFSv2 has no OPEN.  A client opening a name with O_CREAT sends CREATE
+    whether or not the name is there, so `> /dev/null' in a shell on the
+    client arrives here as a CREATE of a character device -- config.guess(1)
+    does it a dozen times before it says a word.  The server must answer with
+    the node that is already there.  What it must *not* do is open the node,
+    because the numbers in it are the client's, and this host's device of the
+    same numbers is either missing (ENXIO, and the client's shell says "No
+    such device or address") or someone else's disk.
+
+    Changes nothing and leaves nothing behind: the name it CREATEs already
+    exists, and the point of the check is that it still does afterwards.
+    """
+    parent, _, name = relpath.rpartition("/")
+    pfh = v2_walk(sock, args, dirfh, nport, parent) if parent else dirfh
+    if pfh is None:
+        print(f"\nLOOKUP {parent}: not there, so there is no device to create")
+        return False
+    fh = v2_lookup(sock, args, pfh, nport, name)
+    if fh is None:
+        print(f"\nLOOKUP {relpath}: not there, so there is no device to create")
+        return False
+    before = v2_getattr(sock, args, fh, nport)
+    if before is None or before[0] not in (NFCHR, NFBLK):
+        print(f"\n{relpath} is not a device node, so this check proves nothing")
+        return False
+
+    newfh = v2_create(sock, args, pfh, nport, name)
+    if newfh is None:
+        print(f"\nCREATE {relpath} -> an error.  A shell on the client saying "
+              f"`> /{relpath}' gets that error and stops; look in "
+              f"log/nfs2d.log for which one")
+        return False
+    after = v2_getattr(sock, args, fh, nport)
+    if after is None:
+        print(f"\nGETATTR {relpath} after CREATE -> an error; the node is gone")
+        return False
+    # type, mode and rdev: everything a client acts on for a device node.
+    for what, index in (("type", 0), ("mode", 1), ("rdev", 6)):
+        if before[index] != after[index]:
+            print(f"\nCREATE {relpath} changed {what}: "
+                  f"{before[index]:#o} -> {after[index]:#o}")
+            return False
+    print(f"CREATE {relpath:<11} -> the device is still the device")
+    return True
+
+
 def check_symlinks(sock, args, dirfh, nport, localdir):
     """Does every symlink in the export root read back as itself?
 
@@ -671,6 +724,10 @@ def main():
                     help="check that SETATTR really changes mode and mtime, "
                          "in the reply and on a later GETATTR (NFSv2, "
                          "writable export)")
+    ap.add_argument("--check-create-device", metavar="PATH", default=None,
+                    help="CREATE this device node, which already exists, and "
+                         "check it is still the same device afterwards "
+                         "(a shell's `> /dev/null' arrives as a CREATE)")
     ap.add_argument("--check-rename", action="store_true",
                     help="check that a file handle survives the file being "
                          "renamed, and that one whose file is gone answers "

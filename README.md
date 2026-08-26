@@ -447,6 +447,45 @@ SETATTR box/dev/console (nothing asked) [mode: the device specfile owns it] -> O
 reply *and* in a later `GETATTR` — a server that answered from what it was
 asked rather than from the file would pass the first.
 
+### `> /dev/null` is a CREATE
+
+NFSv2 has no `OPEN`. A client opening a name with `O_CREAT` sends `CREATE`
+whether or not the name is already there, so a shell on the client redirecting
+into `/dev/null` arrives here as a `CREATE` of a character device --
+`config.guess` does it a dozen times before it says a word:
+
+```
+LOOKUP null in sun2_f_m/dev -> OK
+CREATE sun2_f_m/dev/null -> NXIO
+```
+
+and on the Sun-2:
+
+```
+./config.guess: /dev/null: No such device or address
+```
+
+`NXIO` is `ENXIO`, and it came from this host. `CREATE` opened the name with
+`O_CREAT|O_TRUNC`, and the name is a real character device whose numbers are
+*the client's*: `/dev/null` on SunOS is 3/2, which on Linux is `hdb2`, a disk
+that is not there. That is the harmless outcome. On a host where 3/2 did
+exist, an `O_TRUNC` open of someone else's disk is the other one.
+
+So `CREATE` now looks before it opens. A name that is already there and is not
+a regular file is handed back as it stands -- which is what a local `create`
+does too, since only a regular file has anything to truncate -- and a
+directory gets `ISDIR`. `READ` and `WRITE` already refused anything but a
+regular file, for the same reason; `CREATE` was the way in that was left.
+
+This applies to both roots, and for the same reason. In the SunOS root the
+node really is a device; in the NetBSD root it is an empty file that the
+device specfile describes as one, and `lstat()` here reports what the specfile
+says -- so a placeholder is not a regular file either, and is left alone
+rather than truncated.
+
+`nfs-probe.py --check-create-device dev/null` looks the node up, `CREATE`s it,
+and requires that type, mode and rdev are all unchanged afterwards.
+
 ### A handle names a file, not a name
 
 A real NFS server derives a file handle from the inode, so a rename does not

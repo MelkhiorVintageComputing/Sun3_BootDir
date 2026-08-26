@@ -535,6 +535,13 @@ class Server:
                 return SpecStat(st, *spec)
         return st
 
+    def exists(self, path):
+        """lstat() the name, or None if there is no such name."""
+        try:
+            return self.lstat(path)
+        except FileNotFoundError:
+            return None
+
     def attrs(self, st):
         return pack_fattr(st, self.squash and not getattr(st, "from_spec", False))
 
@@ -686,6 +693,25 @@ class Server:
                 if proc == 14:
                     os.mkdir(target, perm if perm else 0o755)
                 else:
+                    st = self.exists(target)
+                    if st is not None and not stat.S_ISREG(st.st_mode):
+                        # NFSv2 has no OPEN, so a client opening an existing
+                        # name with O_CREAT sends CREATE.  `> /dev/null' in a
+                        # shell on the client is a CREATE of a character
+                        # device, and opening it here would open *this* host's
+                        # device with the same numbers -- which either does not
+                        # exist (ENXIO, and the client's shell says "No such
+                        # device or address") or is somebody else's disk.  The
+                        # name already exists and is not a file to truncate:
+                        # hand back what is there, as a local create would.
+                        if stat.S_ISDIR(st.st_mode):
+                            return err(NFSERR_ISDIR, f" {self.shortname(target)}")
+                        handle = self.export.remember(canon(target))
+                        self.log(f"{who} {op} {self.shortname(target)} "
+                                 f"-> OK (exists, left alone)")
+                        return self.accepted(
+                            xid, SUCCESS,
+                            struct.pack("!I", NFS_OK) + handle + self.attrs(st))
                     fd = os.open(target, os.O_CREAT | os.O_WRONLY
                                  | os.O_TRUNC | os.O_NOFOLLOW, perm)
                     if size not in (0, 0xFFFFFFFF):

@@ -243,7 +243,8 @@ else
 		--nfs-version 2
 	[ -z "$NFS2D_SPEC" ] || set -- "$@" \
 		--check-devices "$NFSROOT/$NFS2D_SPEC/dev/MAKEDEV.spec" \
-		--check-setattr --check-rename --check-mount-fallback
+		--check-setattr --check-rename --check-mount-fallback \
+		--check-create-device dev/null
 	if out=$(python3 "$BOOTDIR/tools/nfs-probe.py" "$@" 2>&1); then
 		ok "nfs2d served $NFS2D_CLIENT over NFSv2"
 		printf '%s\n' "$out" | sed 's/^/        /'

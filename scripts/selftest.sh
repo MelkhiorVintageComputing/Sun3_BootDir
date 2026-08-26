@@ -248,9 +248,10 @@ else
 					--nfs-version 2 --expect-writable .profile \
 					--check-devices "$NFSROOT/$n/dev/MAKEDEV.spec" \
 					--check-setattr --check-rename \
+					--check-create-device dev/null \
 					--check-mount-fallback \
 					>"$LOG/nfs-probe-$n-root.out" 2>&1; then
-				ok "$n: root writable and renamable, /dev matches its specfile, MOUNT ends at v2"
+				ok "$n: root writable and renamable, /dev matches its specfile and survives a redirect, MOUNT ends at v2"
 			else
 				no "$n: its NetBSD root is not servable as it stands:"
 				sed 's/^/        /' "$LOG/nfs-probe-$n-root.out"
@@ -267,8 +268,9 @@ else
 				# READLINK has to work on the handle LOOKUP
 				# returned, not only on plain files.
 				set -- --expect-writable swap \
-					--check-symlinks "$NFSROOT/$n"
-				what="root writable, symlinks resolvable"
+					--check-symlinks "$NFSROOT/$n" \
+					--check-create-device dev/null
+				what="root writable, symlinks resolvable, /dev/null survives a shell redirect"
 			else
 				set -- --expect-writable swap --expect-readonly "$want"
 				what="swap writable, $want not"
