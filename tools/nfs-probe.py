@@ -115,15 +115,22 @@ NFSPROC2_LOOKUP, NFSPROC2_READ = 4, 6
 
 def probe_v2(sock, args, export):
     """MOUNT v1 then NFS v2, which is all SunOS 4.0.3 can speak."""
-    try:
-        mport = getport(sock, args.server, MOUNTPROG, MOUNTVERS1)
-    except Exception as exc:
-        print(f"GETPORT mountd v1: FAILED: {exc}")
-        return 1
-    if mport == 0:
-        print("GETPORT mountd v1: not registered -- is tools/nfs2d.py running?")
-        return 1
-    print(f"GETPORT mountd v1   -> port {mport}")
+    if args.mount_port:
+        # For a server that is deliberately not registered: a second instance
+        # on a spare port, so that testing a change costs the running one
+        # nothing.
+        mport = args.mount_port
+        print(f"MOUNT v1 straight to port {mport} (no portmapper lookup)")
+    else:
+        try:
+            mport = getport(sock, args.server, MOUNTPROG, MOUNTVERS1)
+        except Exception as exc:
+            print(f"GETPORT mountd v1: FAILED: {exc}")
+            return 1
+        if mport == 0:
+            print("GETPORT mountd v1: not registered -- is tools/nfs2d.py running?")
+            return 1
+        print(f"GETPORT mountd v1   -> port {mport}")
 
     reply = rpc_call(sock, (args.server, mport), MOUNTPROG, MOUNTVERS1, 1,
                      xdr_string(export))
@@ -187,6 +194,9 @@ def probe_v2(sock, args, export):
     if args.check_devices:
         if not check_devices(sock, args, fh, nport, args.check_devices, export):
             return 1
+    if args.check_rename:
+        if not check_rename(sock, args, fh, nport):
+            return 1
     if args.check_mount_fallback:
         if not check_mount_fallback(sock, args, export):
             return 1
@@ -198,8 +208,10 @@ def probe_v2(sock, args, export):
 
 NFSPROC2_WRITE = 8
 NFSPROC2_READLINK = 5
+NFSPROC2_CREATE, NFSPROC2_REMOVE, NFSPROC2_RENAME = 9, 10, 11
 NFSERR_ROFS = 30
 NFSERR_IO = 5
+NFSERR_STALE = 70
 NFBLK, NFCHR, NFLNK = 3, 4, 5
 
 
@@ -218,6 +230,114 @@ def v2_write(sock, args, fh, nport, offset, data):
                      fh + struct.pack("!III", 0, offset, len(data))
                      + xdr_string(data))
     return Decoder(reply).u32()
+
+
+def v2_create(sock, args, dirfh, nport, name):
+    """CREATE: diropargs, then a sattr whose 0xFFFFFFFF fields mean
+    "leave alone"."""
+    sattr = struct.pack("!8I", 0o644, 0xFFFFFFFF, 0xFFFFFFFF, 0,
+                        0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_CREATE, dirfh + xdr_string(name) + sattr)
+    d = Decoder(reply)
+    return None if d.u32() != 0 else d.fixed(32)
+
+
+def v2_rename(sock, args, dirfh, nport, old, new):
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_RENAME,
+                     dirfh + xdr_string(old) + dirfh + xdr_string(new))
+    return Decoder(reply).u32()
+
+
+def v2_remove(sock, args, dirfh, nport, name):
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_REMOVE, dirfh + xdr_string(name))
+    return Decoder(reply).u32()
+
+
+def v2_read(sock, args, fh, nport, count):
+    reply = rpc_call(sock, (args.server, nport), NFSPROG, NFSVERS2,
+                     NFSPROC2_READ, fh + struct.pack("!III", 0, count, count))
+    d = Decoder(reply)
+    if d.u32() != 0:
+        return None
+    d.off += 68
+    return d.opaque()
+
+
+def check_rename(sock, args, dirfh, nport):
+    """Does a file handle still name the file after the file is renamed?
+
+    This is what a compiler does: the linker writes l.outaNNN, renames it over
+    its target, and goes on writing through the descriptor it already had.  A
+    real NFS server derives handles from the inode and never notices.  A
+    handle derived from the path stops naming anything, and the writes that
+    follow have to land somewhere sensible -- in the renamed file -- or at the
+    very least come back as an error rather than as nothing at all, which
+    costs the client a retransmit every 64 seconds for ever.
+
+    Creates and removes one file of its own, and leaves nothing behind.
+    """
+    tmp, final = "nfs2d-rename-probe.tmp", "nfs2d-rename-probe"
+    for leftover in (tmp, final):
+        if v2_lookup(sock, args, dirfh, nport, leftover) is not None:
+            v2_remove(sock, args, dirfh, nport, leftover)
+
+    fh = v2_create(sock, args, dirfh, nport, tmp)
+    if fh is None:
+        print(f"\nCREATE {tmp} failed, so there is nothing to rename")
+        return False
+    if v2_write(sock, args, fh, nport, 0, b"before") != 0:
+        print(f"\nWRITE {tmp} failed before any rename")
+        return False
+
+    status = v2_rename(sock, args, dirfh, nport, tmp, final)
+    if status != 0:
+        print(f"\nRENAME {tmp} -> {final} -> NFSv2 error {status}")
+        v2_remove(sock, args, dirfh, nport, tmp)
+        return False
+
+    # The handle from before the rename, used exactly as a client would.
+    try:
+        status = v2_write(sock, args, fh, nport, 6, b"after!")
+    except TimeoutError:
+        # The failure this check exists for: not a refusal but a silence, and
+        # a client has no way to stop asking for an answer that never comes.
+        print(f"\nWRITE through the pre-rename handle -> no reply at all.  "
+              f"A client retransmits this every 64 seconds for ever; look in "
+              f"log/nfs2d.log for what it could not answer")
+        v2_remove(sock, args, dirfh, nport, final)
+        return False
+    if status != 0:
+        print(f"\nWRITE through the pre-rename handle -> NFSv2 error {status}; "
+              f"a client writing through an open descriptor loses the bytes")
+        v2_remove(sock, args, dirfh, nport, final)
+        return False
+    newfh = v2_lookup(sock, args, dirfh, nport, final)
+    got = v2_read(sock, args, newfh, nport, 512) if newfh else None
+    if got != b"beforeafter!":
+        print(f"\n{final} holds {got!r}, expected b'beforeafter!'; the write "
+              f"through the old handle did not land in the renamed file")
+        v2_remove(sock, args, dirfh, nport, final)
+        return False
+    print(f"RENAME             -> a handle still names its file after a rename")
+
+    # And once the file really is gone, the answer must be an answer.
+    v2_remove(sock, args, dirfh, nport, final)
+    try:
+        status = v2_write(sock, args, fh, nport, 0, b"gone")
+    except TimeoutError:
+        print(f"\nWRITE to a removed file -> no reply at all, so a client "
+              f"retransmits for ever rather than being told STALE")
+        return False
+    if status != NFSERR_STALE:
+        print(f"\nWRITE to a removed file -> status {status}, expected STALE "
+              f"({NFSERR_STALE}).  A client that is answered with nothing "
+              f"retransmits for ever")
+        return False
+    print(f"WRITE              -> a handle whose file was removed answers STALE")
+    return True
 
 
 def check_writability(sock, args, dirfh, nport):
@@ -471,6 +591,13 @@ def main():
     ap.add_argument("--expect-readonly", metavar="NAME", default=None,
                     help="NFSv2 only: check a write to NAME is refused with "
                          "ROFS, so a kernel beside the swap file stays safe")
+    ap.add_argument("--mount-port", type=int, default=None,
+                    help="send MOUNT here instead of asking the portmapper, "
+                         "for an unregistered server (NFSv2 only)")
+    ap.add_argument("--check-rename", action="store_true",
+                    help="check that a file handle survives the file being "
+                         "renamed, and that one whose file is gone answers "
+                         "STALE rather than nothing (NFSv2, writable export)")
     ap.add_argument("--check-mount-fallback", action="store_true",
                     help="walk the MOUNT versions as a NetBSD kernel does -- "
                          "3, then 2, then 1 -- and check it reaches one this "

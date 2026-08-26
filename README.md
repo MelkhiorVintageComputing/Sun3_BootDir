@@ -403,6 +403,51 @@ Both Sun-3s and the Sun-2 can boot at the same time, each over the version it
 understands. `nfs2d` registers itself through the portmapper, so its port is
 not something a client has to be told.
 
+### A handle names a file, not a name
+
+A real NFS server derives a file handle from the inode, so a rename does not
+disturb it: a client goes on writing through the handle it opened with and the
+bytes land in the renamed file. These handles are derived from the path, which
+is what makes them survive a restart — and what makes a rename break them.
+
+That is not a corner case. It is what a compiler does:
+
+```
+WRITE l.outa00023 16384+512 -> OK
+RENAME sun2_f_m/tmp/l.outa00023 -> sun2_f_m/tmp/dhry
+READ  -> NOENT
+```
+
+`ld` writes its output under a temporary name, renames it over the target, and
+carries on through the descriptor it already had. So `Export` keeps an alias
+for the handle minted from the old name, pointing at the new one, and a chain
+of renames drags every handle in it along. The aliases are re-applied after a
+rescan, since a walk of the tree can never rediscover a handle whose name no
+longer exists — and a rescan is triggered by a handle miss, which is exactly
+when one is being looked up.
+
+### Silence is the one answer a client cannot use
+
+The same trace ended in a loop, and the reason is worth stating on its own.
+`nfs2d` answered a `WRITE` to the renamed-away file with **nothing at all** —
+an `lstat` outside a `try`, an exception caught by the top-level handler, and
+`reply = None`. The client retransmitted at 4.6s, 9.2s, 18.4s, 36.9s and then
+every 63 seconds, for ever.
+
+An error is a fine answer; no answer is not one, because a client has no way
+to stop asking for it. So the dispatcher now wraps every NFSv2 call and
+answers `NFSERR_IO` on anything unexpected — every NFSv2 reply begins with a
+status, and a non-zero one means nothing follows, so that is well-formed for
+any procedure — and names the client, the procedure and the exception in the
+log instead of printing a bare `FileNotFoundError`. A handle whose file is
+genuinely gone gets `NFSERR_STALE`, which is what it means: `NOENT` is about a
+name the client asked for, and here it did not ask for one.
+
+`nfs-probe.py --check-rename` covers both. It creates a file, writes through
+the handle, renames it, writes through the *pre-rename* handle, reads the
+result back whole, then removes the file and requires `STALE` rather than
+silence.
+
 ### 2049 has to be the NFSv2 server
 
 SunOS asks the portmapper for **mountd** and then sends **NFS straight to
@@ -586,14 +631,19 @@ the network. It belongs in whatever fixes the hardware.
 
 Two things that are *not* the lever, so nobody spends the afternoon on them:
 
-* **The client cannot be asked for less.** `STATFS` carries `tsize` — "the
-  number of bytes the server would like to have in the data part of READ and
-  WRITE requests" (RFC 1094) — and `NFS2D_TSIZE` sets it. A SunOS kernel
-  mounting its root ignores it and has no mount options to pass at boot; it
-  asked for 8192 again after a reboot. (`boot.sun2`'s 1024-byte reads are its
-  own choice, not ours, which is why the kernel loads and then userland does
-  not.) The knob is kept because it is a legitimate NFSv2 setting and a client
-  that honours it benefits, not because it helps here.
+* **The client cannot be asked for less *at boot*.** `STATFS` carries `tsize`
+  — "the number of bytes the server would like to have in the data part of
+  READ and WRITE requests" (RFC 1094) — and `NFS2D_TSIZE` sets it. A SunOS
+  kernel mounting its **root** ignores it and has no mount options to pass at
+  boot; it asked for 8192 again after a reboot. (`boot.sun2`'s 1024-byte reads
+  are its own choice, not ours, which is why the kernel loads and then
+  userland does not.)
+
+  Once that userland is up it is a different matter: the same client honours
+  `tsize` for writes, and every WRITE it sends is 1024 bytes or the short tail
+  of one. That is 8× the RPCs an 8192-byte `wsize` would need, and it is also
+  why a write never has to be fragmented — so the knob does earn its keep,
+  just not at the point in the boot where it was first reached for.
 * **The server cannot send less.** A short NFSv2 READ is how end of file is
   signalled, so trimming a reply would silently truncate the file rather than
   slow it down. `MAXDATA` stays at 8192 for that reason.

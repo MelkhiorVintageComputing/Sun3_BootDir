@@ -234,6 +234,14 @@ class Export:
         self.root = os.path.realpath(root)
         self.debug = debug
         self.by_handle = {}
+        # Handles minted for a name that has since been renamed away.  A real
+        # NFS server derives a handle from the inode, so a rename does not
+        # disturb it: the client goes on writing through the handle it opened
+        # with and the bytes land in the renamed file.  Ours are derived from
+        # the path, so the rename has to be recorded or the handle names
+        # nothing -- which is exactly what a compiler does, writing l.outaNNN
+        # and renaming it over the target while the descriptor is still open.
+        self.aliases = {}
         self.scan()
 
     @staticmethod
@@ -248,10 +256,29 @@ class Export:
             for name in filenames + dirnames:
                 self.remember(os.path.join(dirpath, name))
         self.remember(self.root)
+        # Re-applied last: a walk of the tree cannot rediscover a handle whose
+        # name no longer exists, and a rescan happens on any handle miss --
+        # which is precisely when a renamed-away handle is being looked up.
+        self.by_handle.update(self.aliases)
 
     def remember(self, path):
         self.by_handle[self.handle_for(path)] = path
         return self.handle_for(path)
+
+    def renamed(self, src, dst):
+        """Keep the handle minted for src naming the object, now called dst.
+
+        Also re-points any handle already aliased to src, so that a chain of
+        renames -- a to b, then b to c -- leaves every handle in it pointing
+        at c rather than at a name that has moved on again.
+        """
+        src, dst = canon(src), canon(dst)
+        for handle, path in self.aliases.items():
+            if path == src:
+                self.aliases[handle] = dst
+        self.aliases[self.handle_for(src)] = dst
+        self.by_handle.update(self.aliases)
+        return self.remember(dst)
 
     def resolve(self, handle):
         """Path for a handle, rescanning once in case the tree changed."""
@@ -515,7 +542,7 @@ class Server:
             try:
                 reply = self.handle(data, addr)
             except Exception as exc:                      # never die on a client
-                self.log("error handling a call:", repr(exc))
+                self.log(f"error handling a call from {addr[0]}:", repr(exc))
                 reply = None
             if reply:
                 try:
@@ -543,7 +570,17 @@ class Server:
             if vers != NFSVERS:
                 return self.accepted(xid, PROG_MISMATCH,
                                      struct.pack("!II", NFSVERS, NFSVERS))
-            return self.nfs(xid, proc, d, addr)
+            try:
+                return self.nfs(xid, proc, d, addr)
+            except Exception as exc:                      # never answer nothing
+                # Every NFSv2 reply begins with a status, and a non-zero one
+                # means nothing follows, so this is a well-formed answer to
+                # any procedure.  A client that gets no answer at all has no
+                # way to stop asking; one that gets an error can give up and
+                # say so.
+                self.log(f"{addr[0]} {NFS2_PROCS.get(proc, proc)}: "
+                         f"{exc!r} -> IO")
+                return self.accepted(xid, SUCCESS, struct.pack("!I", NFSERR_IO))
         if prog == MOUNTPROG:
             if vers not in MOUNT_VERSIONS:
                 # The whole point of registering a version we do not serve:
@@ -664,7 +701,7 @@ class Server:
                 os.rename(src, dst)
             except OSError as exc:
                 return err(errno_to_nfs(exc))
-            self.export.remember(canon(dst))
+            self.export.renamed(src, dst)
             self.log(f"{who} RENAME {self.shortname(src)} -> {self.shortname(dst)}")
             return status_only(NFS_OK)
 
@@ -735,13 +772,22 @@ class Server:
                 return err(NFSERR_STALE)
             if not self.is_writable(path):
                 return err(NFSERR_ROFS, f" {self.shortname(path)}")
-            if not stat.S_ISREG(self.lstat(path).st_mode):
-                return err(NFSERR_IO, f" {self.shortname(path)} is not a regular file")
             try:
+                # Inside the try: the name a handle was minted from can stop
+                # existing between one call and the next, and an lstat that
+                # raises out of here answers the client with nothing at all --
+                # which costs it a retransmit every 64 seconds for ever.
+                if not stat.S_ISREG(self.lstat(path).st_mode):
+                    return err(NFSERR_IO, f" {self.shortname(path)} is not a regular file")
                 with opennofollow(path, "r+b") as fh:
                     fh.seek(offset)
                     fh.write(data)
                 st = self.lstat(path)
+            except FileNotFoundError:
+                # The handle resolved, but to a name that is gone.  STALE, not
+                # NOENT: NOENT is about a name the client asked for, and the
+                # client did not ask for one -- it gave us a handle.
+                return err(NFSERR_STALE, f" {self.shortname(path)}")
             except OSError as exc:
                 return err(errno_to_nfs(exc))
             self.log(f"{who} WRITE {os.path.basename(path)} "
