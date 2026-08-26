@@ -25,11 +25,17 @@ UNFSD_PORT=${UNFSD_PORT:-2050}
 NFS2D_TSIZE=${NFS2D_TSIZE:-1024}
 
 # payload=netbsd2: a release of its own, old enough to be in the archive only.
-NETBSD2_RELEASE=${NETBSD2_RELEASE:-2.0}
+NETBSD2_RELEASE=${NETBSD2_RELEASE:-2.0.2}
 NETBSD2_KERNEL_SUN2=${NETBSD2_KERNEL_SUN2:-netbsd-DISKLESS}
 NETBSD2_SETS=${NETBSD2_SETS:-'base etc'}
 
 DIST=$BOOTDIR/dist
+
+# The netbsd2 downloads carry their release in the name: the cache in dist/ is
+# a cache of "NetBSD $NETBSD2_RELEASE for sun2", and changing the release has
+# to fetch a different set of files rather than find the old ones sitting there
+# under the names it wants.
+NETBSD2_DIST=$DIST/netbsd2-$NETBSD2_RELEASE
 PKG=$BOOTDIR/pkg
 SBIN=$BOOTDIR/sbin
 ETC=$BOOTDIR/etc
@@ -112,7 +118,7 @@ check_clients() {
 	done || exit 1
 }
 
-# A NetBSD 2.0 kernel asks the portmapper for MOUNT version 3, then 2, then 1,
+# A NetBSD 2.0.2 kernel asks the portmapper for MOUNT version 3, then 2, then 1,
 # and stops at the first version that answers at all -- so if unfs3 is there on
 # version 3 it mounts its root over NFSv3, and a netbsd2 root cannot be served
 # that way: its /dev is 855 placeholder files that only nfs2d knows are device

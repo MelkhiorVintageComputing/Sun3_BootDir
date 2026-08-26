@@ -87,7 +87,7 @@ mkdir -p "$ETC" "$TFTPBOOT" "$NDBOOT" "$RUN" "$LOG"
 		# never open its console.  Say so where someone looking for the
 		# missing line will find it.
 		if [ "$p" = netbsd2 ]; then
-			printf '# %s is served by tools/nfs2d.py only; see README, "NetBSD 2.0 with a real root"\n' \
+			printf '# %s is served by tools/nfs2d.py only; see README, "NetBSD 2.0.2 with a real root"\n' \
 				"$NFSROOT/$n"
 			continue
 		fi

@@ -564,7 +564,7 @@ def check_symlinks(sock, args, dirfh, nport, localdir):
 
 
 def check_mount_fallback(sock, args, export):
-    """Walk the MOUNT versions the way a NetBSD 2.0 kernel does.
+    """Walk the MOUNT versions the way a NetBSD 2.0.2 kernel does.
 
     sys/nfs/nfs_boot.c md_mount() asks the portmapper for MOUNT version 3,
     calls it, and only tries the next version down if that call comes back

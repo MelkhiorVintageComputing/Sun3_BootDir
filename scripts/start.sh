@@ -133,7 +133,7 @@ start_ndbootd() {
 
 start_nfs2d() {
 	# SunOS 4.0.3 is from 1989 and speaks NFS version 2; so does every NetBSD
-	# bootstrap, and a NetBSD 2.0 kernel will too once nothing offers it
+	# bootstrap, and a NetBSD 2.0.2 kernel will too once nothing offers it
 	# version 3.  unfs3 serves version 3 and nothing else.
 	if [ -z "$(clients | awk '$5 == "sunos" || $5 == "netbsd2"')" ]; then
 		say "no sunos or netbsd2 client configured; not starting nfs2d"

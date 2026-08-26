@@ -1,5 +1,5 @@
 #!/bin/sh
-# Unpack a NetBSD 2.0/sun2 root filesystem for a netbooting Sun-2.
+# Unpack a NetBSD 2.0.2/sun2 root filesystem for a netbooting Sun-2.
 #
 # Nothing here needs privilege, which is the whole reason it is in scripts/
 # rather than beside root/make-sunos-root.sh.  A root filesystem normally
@@ -40,8 +40,8 @@ DEST=$NFSROOT/$NAME
 SERVER_HOST=$(hostname -s)
 
 for s in $NETBSD2_SETS; do
-	[ -f "$DIST/netbsd2-$s.tgz" ] \
-		|| die "dist/netbsd2-$s.tgz missing -- run scripts/02-fetch-payload.sh first"
+	[ -f "$NETBSD2_DIST-$s.tgz" ] \
+		|| die "$(basename "$NETBSD2_DIST-$s.tgz") missing -- run scripts/02-fetch-payload.sh first"
 done
 
 say "client $NAME at $IP"
@@ -55,7 +55,7 @@ mkdir -p "$DEST"
 rm -rf "$DEST/dev"
 for s in $NETBSD2_SETS; do
 	say "unpacking $s.tgz"
-	tar xpzf "$DIST/netbsd2-$s.tgz" -C "$DEST" || die "$s.tgz did not unpack"
+	tar xpzf "$NETBSD2_DIST-$s.tgz" -C "$DEST" || die "$s.tgz did not unpack"
 done
 
 # --- /dev -------------------------------------------------------------------

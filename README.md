@@ -6,7 +6,7 @@ from an empty directory.
 
 Also boots a Sun-2, which needs an entirely different protocol; see "A Sun-2" --
 two of them at once if you like, each running something different: SunOS 4.0.3
-on one and NetBSD 2.0 with a real NFS root on the other.
+on one and NetBSD 2.0.2 with a real NFS root on the other.
 
 Almost nothing here runs with privilege. One script needs root and is run once;
 a second, needed only to boot SunOS, adds a single address.
@@ -88,7 +88,7 @@ sun2b	08:00:20:01:06:e1	192.168.0.124	sun2	netbsd2
 ```
 
 The fifth column is what the machine boots: `netbsd` (the default, NetBSD 10.1
-with a RAMDISK kernel), `sunos` (SunOS 4.0.3), or `netbsd2` (NetBSD 2.0 with a
+with a RAMDISK kernel), `sunos` (SunOS 4.0.3), or `netbsd2` (NetBSD 2.0.2 with a
 real root filesystem). The last two are sun2-only.
 
 An emulated Sun-3 is just another line. `sun3b` above is QEMU on a tap bridged
@@ -182,7 +182,7 @@ reports it as `(no carrier yet)` rather than a failure.
 | `root/grant-privileges.sh` | **root, once** | four `setcap`s and one symlink |
 | `root/allow-oldstyle-broadcast.sh` | **root** | one address, for a SunOS client only |
 | `root/make-sunos-root.sh` | **root, once** | unpacks a SunOS root (needs `mknod`) |
-| `scripts/04-make-netbsd2-root.sh` | none | unpacks a NetBSD 2.0 root, `/dev` included |
+| `scripts/04-make-netbsd2-root.sh` | none | unpacks a NetBSD 2.0.2 root, `/dev` included |
 | `scripts/start.sh` | none | starts the daemons (`m1`/`m2`/`m3`, or one by name) |
 | `scripts/stop.sh` | none | stops them |
 | `scripts/status.sh` | none | what is running, listening, registered; `-f` tails logs |
@@ -365,7 +365,7 @@ NetBSD. `03-configure.sh` puts each machine's first stage in `ndboot/` under
 its own name, so the two can be powered on at the same time.
 
 Both end up on NFS version 2: every NetBSD bootstrap is version 2 only
-(`sys/lib/libsa/nfs.c` in 2.0 knows nothing else, and 10.1 tries version 3 and
+(`sys/lib/libsa/nfs.c` in 2.0.2 knows nothing else, and 10.1 tries version 3 and
 falls back), and so is every SunOS 4.x one. Version 3 only comes into it when
 a NetBSD *kernel* mounts its root; see "Which server answers MOUNT".
 
@@ -780,7 +780,7 @@ device nodes in `/dev` cannot be opened here by their host-side numbers. (Their
 `rdev` values are reported correctly: SunOS's `(major << 8) | minor` and Linux's
 encoding agree for every node in this tree.)
 
-## NetBSD 2.0 with a real root
+## NetBSD 2.0.2 with a real root
 
 The other Sun-2 in the table boots NetBSD, and not the one the Sun-3s get:
 
@@ -789,13 +789,13 @@ sun2b	08:00:20:01:06:e1	192.168.0.124	sun2	netbsd2
 ```
 
 NetBSD 10.1 still builds for sun2, and `netbsd-RAMDISK` boots on one, but its
-userland does not fit a machine with 4MB of RAM and a 68010. NetBSD 2.0 is the
-last release whose sun2 binaries are worth running on the hardware, and it is
+userland does not fit a machine with 4MB of RAM and a 68010. The NetBSD 2 line
+is the last whose sun2 binaries are worth running on the hardware, and it is
 old enough to live in the archive rather than on the mirrors, so it gets its
 own release number and its own base URL:
 
 ```sh
-NETBSD2_RELEASE=2.0
+NETBSD2_RELEASE=2.0.2
 NETBSD2_KERNEL_SUN2=netbsd-DISKLESS
 NETBSD2_SETS='base etc'
 ```
@@ -803,6 +803,24 @@ NETBSD2_SETS='base etc'
 `DISKLESS` is the sun2 kernel built to mount its root over NFS. `RAMDISK` and
 `INSTALL` carry their own root and would ignore the tree entirely; `GENERIC`
 wants a local disk.
+
+2.0.2 is as far up the 2.0 line as prebuilt sun2 binaries go. 2.0.3 was
+released, and `NetBSD-2.0.3/` is in the archive, but it holds `source/` and the
+`CHANGES` files and nothing else: no `sun2/`, no binaries for any architecture
+at all. Setting `NETBSD2_RELEASE=2.0.3` would only get 404s. 2.1 does have
+sun2 binaries if you want to leave the 2.0 line; nothing here is pinned to 2.0
+beyond this one variable.
+
+The release is part of the name of every file it downloads —
+`dist/netbsd2-2.0.2-base.tgz` — so changing that variable fetches a different
+release rather than finding the previous one already sitting there under the
+name it wants. What lands in `payload/` keeps its plain name, so a release
+change makes `payload/SHA256SUMS` fire, exactly as it is meant to: delete the
+lines for the files that were replaced and the next run records the new ones.
+
+Between 2.0 and 2.0.2 that is only the kernel. `bootyy` and `netboot` are byte
+for byte the same file in both, so the ND chain below is unchanged by the bump;
+what a Sun-2 gets out of it is a newer kernel and a newer userland.
 
 Two steps, neither of them privileged:
 
@@ -867,7 +885,7 @@ GETATTR            -> 855 device nodes match MAKEDEV.spec, and READ of one is re
 
 ### Which server answers MOUNT
 
-A NetBSD 2.0 kernel does not simply ask for the NFS version it wants. From
+A NetBSD 2.0.2 kernel does not simply ask for the NFS version it wants. From
 `sys/nfs/nfs_boot.c`:
 
 ```c
@@ -928,7 +946,7 @@ which:
 | `etc/hosts` | there is no DNS out here; both ends are named by hand |
 
 Everything else is the release as shipped, including `root` with no password,
-which is how NetBSD 2.0 comes and what makes the first console login possible.
+which is how NetBSD 2.0.2 comes and what makes the first console login possible.
 `etc/ttys` already has a getty on `ttya`.
 
 ## What needs root, and why only that
@@ -1147,7 +1165,7 @@ rather than state it holds.
 
 There are two real roots here now, and neither needs privilege at runtime:
 
-| | SunOS 4.0.3 | NetBSD 2.0 |
+| | SunOS 4.0.3 | NetBSD 2.0.2 |
 |---|---|---|
 | unpacked by | `root/make-sunos-root.sh` | `scripts/04-make-netbsd2-root.sh` |
 | needs root | **yes**, once, for `mknod` | no |
@@ -1156,7 +1174,7 @@ There are two real roots here now, and neither needs privilege at runtime:
 
 The SunOS one still needs root because its `/dev` comes out of a tar archive
 with the nodes already in it, and there is no specfile to describe them
-instead. See "A real SunOS root" and "NetBSD 2.0 with a real root".
+instead. See "A real SunOS root" and "NetBSD 2.0.2 with a real root".
 
 ## Layout
 
