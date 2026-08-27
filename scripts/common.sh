@@ -275,5 +275,15 @@ is_running() {  # is_running <name>
 	pidfile=$RUN/$1.pid
 	[ -r "$pidfile" ] || return 1
 	pid=$(cat "$pidfile" 2>/dev/null) || return 1
-	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+	# A pidfile outlives a reboot; the number in it does not.  This host came
+	# up on 2026-08-27 and the kernel handed 3336 -- yesterday's ndbootd -- to
+	# an sshd, so "that pid exists" said ndbootd was running when it was not:
+	# start.sh skipped starting it and stop.sh would have killed the ssh
+	# session.  Ask what the process actually is.  Every daemon here has its
+	# own name in its command line, rpc.bootparamd and nfs2d.py included.
+	case $(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null) in
+	*"$1"*) return 0 ;;
+	esac
+	return 1
 }
